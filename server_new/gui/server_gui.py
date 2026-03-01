@@ -18,7 +18,7 @@ class ServerGUI:
     """服务端GUI界面"""
     def __init__(self, root):
         self.root = root
-        self.root.title("Web集群管理服务端 12303070227李彦逹")
+        self.root.title("Web集群管理服务端")
         self.root.geometry("1200x800")
         
         # 加载配置（修改路径为当前目录下的config.json）
