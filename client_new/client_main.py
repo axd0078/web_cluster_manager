@@ -17,6 +17,7 @@ from pathlib import Path
 from core.address_pool import AddressPool
 from core.task_executor import TaskExecutor
 from core.system_monitor import SystemMonitor
+from core.client_updater import ClientUpdater
 
 
 class Client:
@@ -72,9 +73,13 @@ class Client:
         self.task_executor = TaskExecutor(
             self.config['backup_path'],
             self.config['web_app_path'],
-            self.logger  # 传递logger以便清理日志时关闭文件句柄
+            self.logger,  # 传递logger以便清理日志时关闭文件句柄
+            self.log_dir  # 传递日志目录
         )
         self.monitor = SystemMonitor()
+
+        # 初始化更新器（使用日志目录的父目录作为客户端目录）
+        self.updater = ClientUpdater(self.log_dir.parent)
         
         # 网络配置
         # 兼容旧配置：如果存在command_port，使用它作为client_listen_port
@@ -211,6 +216,38 @@ class Client:
                     # 发送结果
                     conn.send(json.dumps(result).encode('utf-8'))
                     self.logger.info(f"执行命令: {command}, 结果: {result}")
+                elif command == 'execute_command':
+                    # 执行远程命令
+                    cmd = params.get('cmd', '')
+                    timeout = params.get('timeout', 30)
+                    if not cmd:
+                        result = {'status': 'error', 'message': '命令不能为空'}
+                    else:
+                        self.logger.info(f"执行远程命令: {cmd}")
+                        result = self.task_executor.execute_command(cmd, timeout)
+                        self.logger.info(f"命令执行结果: {result.get('return_code', -1)}")
+                    conn.send(json.dumps(result).encode('utf-8'))
+                elif command == 'get_system_info':
+                    # 获取系统详细信息
+                    result = self.task_executor.get_system_info()
+                    result['status'] = 'success'
+                    conn.send(json.dumps(result).encode('utf-8'))
+                    self.logger.info(f"获取系统信息: {result.get('hostname', 'unknown')}")
+                elif command == 'get_version':
+                    # 获取客户端版本
+                    result = {
+                        'status': 'success',
+                        'version': self.updater.get_local_version()
+                    }
+                    conn.send(json.dumps(result).encode('utf-8'))
+                elif command == 'get_files_manifest':
+                    # 获取客户端文件清单
+                    manifest = self.updater.get_local_files_manifest()
+                    result = {
+                        'status': 'success',
+                        'manifest': manifest
+                    }
+                    conn.send(json.dumps(result).encode('utf-8'))
                 else:
                     result = {'status': 'error', 'message': f'未知命令: {command}'}
                     # 发送结果
@@ -223,10 +260,10 @@ class Client:
                 file_size = msg.get('file_size', 0)
                 is_zip = msg.get('is_zip', False)
                 update_type = msg.get('update_type', 'single_file')
-                
+
                 # 发送准备就绪
                 conn.send('ready'.encode('utf-8'))
-                
+
                 # 接收文件数据
                 file_data = b''
                 received = 0
@@ -236,11 +273,83 @@ class Client:
                         break
                     file_data += chunk
                     received += len(chunk)
-                
+
                 # 更新文件
                 result = self.task_executor.update_file(file_data, remote_path, file_size, is_zip)
                 conn.send(json.dumps(result).encode('utf-8'))
                 self.logger.info(f"文件更新 ({update_type}): {remote_path}, 结果: {result}")
+
+            elif msg_type == 'update':
+                # 客户端更新
+                new_version = msg.get('version')
+                update_type = msg.get('update_type', 'incremental')
+
+                self.logger.info(f"收到更新请求: 版本 {new_version}, 类型: {update_type}")
+
+                # 发送准备就绪
+                conn.send('ready'.encode('utf-8'))
+
+                # 接收更新数据
+                update_data = b''
+                conn.settimeout(300)  # 5分钟超时
+
+                while True:
+                    try:
+                        chunk = conn.recv(65536)  # 64KB chunks
+                        if not chunk:
+                            break
+                        update_data += chunk
+                        # 对于增量更新，尝试解析JSON判断是否接收完整
+                        if update_type == 'incremental':
+                            try:
+                                json.loads(update_data.decode('utf-8'))
+                                break  # JSON解析成功，数据接收完整
+                            except:
+                                continue
+                        else:
+                            # 全量更新，等待连接关闭或超时
+                            conn.setblocking(False)
+                            try:
+                                more_data = conn.recv(1)
+                                if not more_data:
+                                    break
+                                update_data += more_data
+                            except:
+                                break
+                            conn.setblocking(True)
+                    except socket.timeout:
+                        break
+
+                self.logger.info(f"更新数据接收完成: {len(update_data)} 字节")
+
+                # 处理更新数据
+                if update_type == 'incremental':
+                    # 增量更新：解码JSON并还原bytes
+                    import base64
+                    try:
+                        encoded_data = json.loads(update_data.decode('utf-8'))
+                        update_dict = {}
+                        for file_path, content in encoded_data.items():
+                            try:
+                                update_dict[file_path] = base64.b64decode(content)
+                            except:
+                                update_dict[file_path] = content
+                        result = self.updater.apply_update(update_dict, new_version, 'incremental')
+                    except Exception as e:
+                        result = {'status': 'error', 'message': f'解析更新数据失败: {str(e)}'}
+                else:
+                    # 全量更新：直接使用bytes
+                    result = self.updater.apply_update(update_data, new_version, 'full')
+
+                conn.send(json.dumps(result).encode('utf-8'))
+                self.logger.info(f"更新结果: {result}")
+
+                # 如果更新成功，清理旧备份并重启
+                if result.get('status') == 'success':
+                    self.updater.cleanup_old_backups(keep_count=3)
+
+                    # 延迟重启，给服务端响应时间
+                    self._schedule_restart(delay=2)
             
         except Exception as e:
             self.logger.error(f"处理命令错误: {e}")
@@ -343,7 +452,48 @@ class Client:
             except Exception as e:
                 self.logger.error(f"监控上报循环错误: {e}")
                 time.sleep(5)
-    
+
+    def _schedule_restart(self, delay=2):
+        """
+        计划延迟重启客户端
+
+        Args:
+            delay: 延迟秒数
+        """
+        import subprocess
+        import sys
+
+        def restart_async():
+            time.sleep(delay)
+
+            self.logger.info("正在重启客户端...")
+
+            # 获取当前Python解释器和脚本路径
+            python_exe = sys.executable
+            script_path = Path(__file__).resolve()
+
+            # 构建重启命令
+            if platform.system() == 'Windows':
+                # Windows: 使用start命令在新窗口启动
+                subprocess.Popen(
+                    [python_exe, str(script_path)],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    cwd=str(script_path.parent)
+                )
+            else:
+                # Linux/Unix: 使用nohup在后台启动
+                subprocess.Popen(
+                    ['nohup', python_exe, str(script_path), '&'],
+                    cwd=str(script_path.parent)
+                )
+
+            # 停止当前客户端
+            self.logger.info("客户端即将重启...")
+            self.running = False
+
+        # 在后台线程中执行重启
+        threading.Thread(target=restart_async, daemon=True).start()
+
     def stop(self):
         """停止客户端"""
         self.running = False

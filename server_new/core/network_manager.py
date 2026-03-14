@@ -26,7 +26,6 @@ class NetworkManager:
         self.running = False
         self.pending_backups = {}  # 存储待处理的备份文件
         self.backup_lock = threading.Lock()  # 备份文件访问锁
-        self.backup_lock = threading.Lock()  # 备份文件访问锁
     
     def start(self):
         self.running = True
@@ -383,6 +382,182 @@ class NetworkManager:
                     pass
             return {'status': 'error', 'message': str(e)}
     
+    def send_command_to_multiple(self, target_ips, command, params=None):
+        """向多个节点发送命令（并发）"""
+        results = {}
+        threads = []
+        results_lock = threading.Lock()
+        
+        def send_to_single(ip):
+            result = self.send_command(ip, command, params)
+            with results_lock:
+                results[ip] = result
+        
+        for ip in target_ips:
+            thread = threading.Thread(target=send_to_single, args=(ip,), daemon=True)
+            thread.start()
+            threads.append(thread)
+        
+        # 等待所有线程完成
+        for thread in threads:
+            thread.join(timeout=60)
+        
+        return results
+    
+    def send_file_to_multiple(self, target_ips, file_path, remote_path):
+        """向多个节点发送文件（并发）"""
+        results = {}
+        threads = []
+        results_lock = threading.Lock()
+        
+        def send_to_single(ip):
+            result = self.send_file(ip, file_path, remote_path)
+            with results_lock:
+                results[ip] = result
+        
+        for ip in target_ips:
+            thread = threading.Thread(target=send_to_single, args=(ip,), daemon=True)
+            thread.start()
+            threads.append(thread)
+        
+        # 等待所有线程完成
+        for thread in threads:
+            thread.join(timeout=300)
+        
+        return results
+    
+    def execute_remote_command(self, target_ip, cmd, timeout=30):
+        """在远程节点执行命令"""
+        return self.send_command(target_ip, 'execute_command', {'cmd': cmd, 'timeout': timeout})
+    
+    def execute_remote_command_on_multiple(self, target_ips, cmd, timeout=30):
+        """在多个远程节点执行命令（并发）"""
+        return self.send_command_to_multiple(target_ips, 'execute_command', {'cmd': cmd, 'timeout': timeout})
+    
+    def get_remote_system_info(self, target_ip):
+        """获取远程节点系统信息"""
+        return self.send_command(target_ip, 'get_system_info', {})
+
+    # ==================== 更新相关方法 ====================
+
+    def check_client_version(self, target_ip):
+        """检查客户端版本"""
+        return self.send_command(target_ip, 'get_version', {})
+
+    def get_client_files_manifest(self, target_ip):
+        """获取客户端文件清单"""
+        return self.send_command(target_ip, 'get_files_manifest', {})
+
+    def push_update_to_client(self, target_ip, update_data, new_version, update_type='incremental'):
+        """
+        推送更新到客户端
+
+        Args:
+            target_ip: 目标节点IP
+            update_data: 更新数据（bytes或dict）
+            new_version: 新版本号
+            update_type: 更新类型 'incremental' 或 'full'
+
+        Returns:
+            dict: 更新结果
+        """
+        try:
+            # 客户端监听端口（默认8887）
+            client_port = 8887
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(300)  # 5分钟超时
+            self.log_callback(f"尝试连接客户端 {target_ip}:{client_port} 推送更新...")
+            sock.connect((target_ip, client_port))
+
+            # 发送更新请求
+            msg = {
+                'type': 'update',
+                'version': new_version,
+                'update_type': update_type
+            }
+            sock.sendall(json.dumps(msg).encode('utf-8'))
+            self.log_callback(f"已发送更新请求到 {target_ip}")
+
+            # 等待客户端准备就绪
+            sock.settimeout(30)
+            ack = sock.recv(1024).decode('utf-8')
+            if ack != 'ready':
+                sock.close()
+                return {'status': 'error', 'message': f'客户端未准备就绪: {ack}'}
+
+            self.log_callback(f"客户端 {target_ip} 已准备就绪，开始发送更新数据...")
+
+            # 发送更新数据
+            if update_type == 'full':
+                # 全量更新：发送zip文件
+                sock.sendall(update_data)
+            else:
+                # 增量更新：发送JSON
+                # 将bytes数据编码为base64
+                import base64
+                encoded_data = {}
+                for file_path, content in update_data.items():
+                    if isinstance(content, bytes):
+                        encoded_data[file_path] = base64.b64encode(content).decode('utf-8')
+                    else:
+                        encoded_data[file_path] = content
+                sock.sendall(json.dumps(encoded_data).encode('utf-8'))
+
+            self.log_callback(f"更新数据已发送到 {target_ip}，等待响应...")
+
+            # 关闭发送端，让客户端知道数据已发送完毕
+            sock.shutdown(socket.SHUT_WR)
+
+            # 接收响应
+            sock.settimeout(60)
+            response_data = b''
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response_data += chunk
+
+            sock.close()
+
+            if response_data:
+                try:
+                    response = json.loads(response_data.decode('utf-8'))
+                    return response
+                except json.JSONDecodeError:
+                    return {'status': 'error', 'message': '响应解析失败'}
+
+            return {'status': 'error', 'message': '未收到客户端响应'}
+
+        except socket.timeout:
+            return {'status': 'error', 'message': '连接超时'}
+        except ConnectionRefusedError:
+            return {'status': 'error', 'message': '客户端拒绝连接'}
+        except Exception as e:
+            return {'status': 'error', 'message': f'推送更新失败: {str(e)}'}
+
+    def push_update_to_multiple(self, target_ips, update_data, new_version, update_type='incremental'):
+        """向多个客户端推送更新（并发）"""
+        results = {}
+        threads = []
+        results_lock = threading.Lock()
+
+        def push_to_single(ip):
+            result = self.push_update_to_client(ip, update_data, new_version, update_type)
+            with results_lock:
+                results[ip] = result
+
+        for ip in target_ips:
+            thread = threading.Thread(target=push_to_single, args=(ip,), daemon=True)
+            thread.start()
+            threads.append(thread)
+
+        # 等待所有线程完成
+        for thread in threads:
+            thread.join(timeout=300)
+
+        return results
+
     def stop(self):
         self.running = False
         if self.command_socket:

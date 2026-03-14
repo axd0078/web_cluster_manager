@@ -9,17 +9,24 @@ import time
 import logging
 import zipfile
 import io
+import subprocess
+import platform
 from pathlib import Path
 
 
 class TaskExecutor:
     """任务执行器"""
-    def __init__(self, backup_path, web_app_path, logger=None):
+    def __init__(self, backup_path, web_app_path, logger=None, log_dir=None):
         self.backup_path = Path(backup_path)
         self.web_app_path = Path(web_app_path)
         self.backup_path.mkdir(parents=True, exist_ok=True)
         self.web_app_path.mkdir(parents=True, exist_ok=True)
         self.logger = logger
+        # 如果提供了log_dir参数，使用它；否则使用模块所在目录的父目录下的log
+        if log_dir:
+            self.log_dir = Path(log_dir)
+        else:
+            self.log_dir = Path(__file__).parent.parent / 'log'
     
     def _close_log_file_handlers(self, log_file_path):
         """关闭指定日志文件的所有文件句柄"""
@@ -49,8 +56,8 @@ class TaskExecutor:
     def clean_log(self, log_date=None, recreate_handler_callback=None):
         """清理日志 - 根据日期删除指定日期的日志文件"""
         try:
-            # 获取日志目录（备份目录的父目录下的log文件夹）
-            log_dir = self.backup_path.parent / 'log'
+            # 使用初始化时设置的日志目录
+            log_dir = self.log_dir
             
             if not log_dir.exists():
                 return {'status': 'error', 'message': f'日志路径不存在: {log_dir}'}
@@ -235,3 +242,123 @@ class TaskExecutor:
                 return {'status': 'success', 'message': f'文件保存完成: {target_path}'}
         except Exception as e:
             return {'status': 'error', 'message': f'文件保存失败: {str(e)}'}
+    
+    def execute_command(self, command, timeout=30):
+        """执行远程命令"""
+        try:
+            # 安全检查：禁止危险命令
+            dangerous_commands = ['rm -rf', 'del /', 'format', 'mkfs', 'dd if=', 
+                                  '> /dev/', 'chmod 777', 'chown root']
+            for dangerous in dangerous_commands:
+                if dangerous in command:
+                    return {
+                        'status': 'error', 
+                        'message': f'禁止执行危险命令: {dangerous}',
+                        'return_code': -1
+                    }
+            
+            # 根据操作系统选择shell和编码
+            if platform.system() == 'Windows':
+                # Windows使用cmd，编码使用系统默认（GBK/cp936）
+                encoding = 'gbk'
+                process = subprocess.Popen(
+                    ['cmd', '/c', command],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    encoding=encoding,
+                    errors='replace'
+                )
+            else:
+                # Linux/Unix使用bash，编码使用UTF-8
+                encoding = 'utf-8'
+                process = subprocess.Popen(
+                    ['bash', '-c', command],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    encoding=encoding,
+                    errors='replace'
+                )
+            
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+                return_code = process.returncode
+                
+                # 限制输出长度
+                max_output_length = 10000
+                if len(stdout) > max_output_length:
+                    stdout = stdout[:max_output_length] + '\n... (输出被截断)'
+                if len(stderr) > max_output_length:
+                    stderr = stderr[:max_output_length] + '\n... (错误输出被截断)'
+                
+                return {
+                    'status': 'success' if return_code == 0 else 'error',
+                    'message': '命令执行完成',
+                    'stdout': stdout,
+                    'stderr': stderr,
+                    'return_code': return_code,
+                    'command': command
+                }
+            except subprocess.TimeoutExpired:
+                process.kill()
+                return {
+                    'status': 'error',
+                    'message': f'命令执行超时（超过{timeout}秒）',
+                    'return_code': -1,
+                    'command': command
+                }
+        except Exception as e:
+            return {
+                'status': 'error',
+                'message': f'命令执行失败: {str(e)}',
+                'return_code': -1,
+                'command': command
+            }
+    
+    def get_system_info(self):
+        """获取系统详细信息"""
+        try:
+            import psutil
+            cpu_count = psutil.cpu_count(logical=True)
+            cpu_count_physical = psutil.cpu_count(logical=False)
+            memory = psutil.virtual_memory()
+            
+            # 获取磁盘信息
+            disks = []
+            if platform.system() == 'Windows':
+                for partition in psutil.disk_partitions():
+                    try:
+                        usage = psutil.disk_usage(partition.mountpoint)
+                        disks.append({
+                            'mountpoint': partition.mountpoint,
+                            'total': usage.total,
+                            'used': usage.used,
+                            'percent': usage.percent
+                        })
+                    except:
+                        pass
+            else:
+                usage = psutil.disk_usage('/')
+                disks.append({
+                    'mountpoint': '/',
+                    'total': usage.total,
+                    'used': usage.used,
+                    'percent': usage.percent
+                })
+            
+            return {
+                'hostname': platform.node(),
+                'os': platform.system(),
+                'os_version': platform.version(),
+                'cpu_count_logical': cpu_count,
+                'cpu_count_physical': cpu_count_physical,
+                'memory_total': memory.total,
+                'memory_available': memory.available,
+                'disks': disks,
+                'python_version': platform.python_version()
+            }
+        except Exception as e:
+            return {'error': str(e)}

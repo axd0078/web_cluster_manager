@@ -1,0 +1,26 @@
+{
+    "server": {
+        "host": "0.0.0.0",
+        "command_port": 8888,
+        "monitor_port": 8889,
+        "heartbeat_interval": 5
+    },
+    "monitoring": {
+        "cpu_threshold": 80,
+        "memory_threshold": 80,
+        "disk_threshold": 90
+    },
+    "alerts": {
+        "enabled": true,
+        "email": ""
+    }
+}
+
+
+
+
+
+
+
+
+
