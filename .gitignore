@@ -62,6 +62,7 @@ server_new/updates/
 .qoder/
 .idea/
 .vscode/
+.claude/
 
 # Archives
 *.zip

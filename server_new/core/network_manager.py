@@ -5,18 +5,30 @@ import socket
 import threading
 import json
 import os
-import time
-import datetime
 from pathlib import Path
-import zipfile
-import io
+from typing import Any, Callable
 
+from shared.protocol import (
+    CLIENT_LISTEN_PORT,
+    STREAM_BUFFER_SIZE,
+    FILE_BUFFER_SIZE,
+    CONNECT_TIMEOUT,
+    COMMAND_TIMEOUT,
+    FILE_TRANSFER_TIMEOUT,
+    MsgType,
+    recv_json,
+    send_json,
+    broadcast,
+)
 from .node_manager import NodeManager
 
 
 class NetworkManager:
     """网络通信管理器"""
-    def __init__(self, command_port, monitor_port, node_manager, log_callback):
+
+    def __init__(self, command_port: int, monitor_port: int,
+                 node_manager: NodeManager,
+                 log_callback: Callable[[str], None]) -> None:
         self.command_port = command_port
         self.monitor_port = monitor_port
         self.node_manager = node_manager
@@ -27,14 +39,14 @@ class NetworkManager:
         self.pending_backups = {}  # 存储待处理的备份文件
         self.backup_lock = threading.Lock()  # 备份文件访问锁
     
-    def start(self):
+    def start(self) -> None:
         self.running = True
         # 启动命令端口监听
         threading.Thread(target=self._listen_commands, daemon=True).start()
         # 启动监控端口监听
         threading.Thread(target=self._listen_monitor, daemon=True).start()
     
-    def _listen_commands(self):
+    def _listen_commands(self) -> None:
         self.command_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.command_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.command_socket.bind(('0.0.0.0', self.command_port))
@@ -48,7 +60,7 @@ class NetworkManager:
                 if self.running:
                     self.log_callback(f"命令端口错误: {e}")
     
-    def _listen_monitor(self):
+    def _listen_monitor(self) -> None:
         self.monitor_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.monitor_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.monitor_socket.bind(('0.0.0.0', self.monitor_port))
@@ -64,57 +76,41 @@ class NetworkManager:
                 if self.running:
                     self.log_callback(f"监控端口错误: {e}")
     
-    def _handle_command(self, conn, addr):
+    def _handle_command(self, conn: socket.socket, addr: tuple[str, int]) -> None:
         msg = None
         try:
-            # 接收完整消息（可能需要多次接收）
-            data = b''
-            conn.settimeout(10)
-            while True:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                # 尝试解析JSON，如果成功说明数据接收完整
-                try:
-                    msg = json.loads(data.decode('utf-8'))
-                    break
-                except json.JSONDecodeError:
-                    # 数据还没接收完整，继续接收
-                    continue
-            
-            if msg:
-                if msg.get('type') == 'register':
-                    self.node_manager.add_node(addr[0], msg.get('os'), msg.get('info'))
-                    conn.send(json.dumps({'status': 'ok'}).encode('utf-8'))
-                elif msg.get('type') == 'heartbeat':
-                    # 心跳消息中包含os和info信息，用于首次注册
-                    self.node_manager.update_heartbeat(
-                        addr[0], 
-                        msg.get('os'), 
-                        msg.get('info')
-                    )
-                    conn.send(json.dumps({'status': 'ok'}).encode('utf-8'))
-                elif msg.get('type') == 'task_result':
-                    self.log_callback(f"节点 {addr[0]} 任务执行结果: {msg.get('result')}")
-                elif msg.get('type') == 'backup_file':
-                    # 接收备份文件
-                    self.log_callback(f"收到节点 {addr[0]} 的备份文件请求，大小: {msg.get('file_size', 0)} 字节")
-                    threading.Thread(target=self._receive_backup_file, args=(conn, addr, msg), daemon=True).start()
-                    return  # 不关闭连接，让线程处理
-        except socket.timeout:
-            self.log_callback(f"接收命令超时: {addr[0]}")
+            msg = recv_json(conn, timeout=CONNECT_TIMEOUT)
+
+            if msg.get('type') == MsgType.REGISTER:
+                self.node_manager.add_node(addr[0], msg.get('os'), msg.get('info'))
+                send_json(conn, {'status': 'ok'})
+            elif msg.get('type') == MsgType.HEARTBEAT:
+                self.node_manager.update_heartbeat(
+                    addr[0],
+                    msg.get('os'),
+                    msg.get('info')
+                )
+                send_json(conn, {'status': 'ok'})
+            elif msg.get('type') == MsgType.TASK_RESULT:
+                self.log_callback(f"节点 {addr[0]} 任务执行结果: {msg.get('result')}")
+            elif msg.get('type') == MsgType.BACKUP_FILE:
+                self.log_callback(f"收到节点 {addr[0]} 的备份文件请求，大小: {msg.get('file_size', 0)} 字节")
+                threading.Thread(target=self._receive_backup_file, args=(conn, addr, msg), daemon=True).start()
+                return  # 不关闭连接，让线程处理
+        except (socket.timeout, ConnectionError) as e:
+            self.log_callback(f"接收命令失败: {addr[0]} - {e}")
         except Exception as e:
             self.log_callback(f"处理命令错误: {e}")
             import traceback
             self.log_callback(f"错误详情: {traceback.format_exc()}")
         finally:
-            if msg and msg.get('type') != 'backup_file':  # 备份文件由线程处理，不在这里关闭
+            if msg and msg.get('type') != MsgType.BACKUP_FILE:
                 conn.close()
             elif not msg:
                 conn.close()
     
-    def _receive_backup_file(self, conn, addr, msg):
+    def _receive_backup_file(self, conn: socket.socket, addr: tuple[str, int],
+                              msg: dict[str, Any]) -> None:
         """接收备份文件"""
         try:
             folder_name = msg.get('folder_name', 'backup')
@@ -130,14 +126,12 @@ class NetworkManager:
             conn.send('ready'.encode('utf-8'))
             
             # 接收文件数据
-            # 使用更大的缓冲区（128KB）减少系统调用次数，提升接收速度
-            BUFFER_SIZE = 131072  # 128KB
             file_data = b''
             received = 0
-            conn.settimeout(300)  # 5分钟超时
+            conn.settimeout(FILE_TRANSFER_TIMEOUT)
             last_log_percent = 0
             while received < file_size:
-                chunk = conn.recv(min(BUFFER_SIZE, file_size - received))
+                chunk = conn.recv(min(FILE_BUFFER_SIZE, file_size - received))
                 if not chunk:
                     break
                 file_data += chunk
@@ -165,210 +159,130 @@ class NetworkManager:
             self.log_callback(f"备份文件已存储到pending_backups，IP: {addr[0]}")
             
             # 发送确认
-            conn.send(json.dumps({'status': 'success', 'message': '备份文件已接收'}).encode('utf-8'))
+            send_json(conn, {'status': 'success', 'message': '备份文件已接收'})
         except Exception as e:
             self.log_callback(f"接收备份文件错误: {e}")
             import traceback
             self.log_callback(f"错误详情: {traceback.format_exc()}")
             try:
-                conn.send(json.dumps({'status': 'error', 'message': str(e)}).encode('utf-8'))
+                send_json(conn, {'status': 'error', 'message': str(e)})
             except:
                 pass
         finally:
             conn.close()
     
-    def _handle_monitor(self, conn, addr):
+    def _handle_monitor(self, conn: socket.socket, addr: tuple[str, int]) -> None:
         try:
-            # 设置接收超时
-            conn.settimeout(10)
-            # 接收完整数据
-            data = b''
-            try:
-                while True:
-                    chunk = conn.recv(4096)
-                    if not chunk:
-                        break
-                    data += chunk
-                    # 尝试解析JSON，如果成功说明数据接收完整
-                    try:
-                        msg = json.loads(data.decode('utf-8'))
-                        if msg.get('type') == 'monitor_data':
-                            # 更新节点监控信息
-                            with self.node_manager.lock:
-                                if addr[0] in self.node_manager.nodes:
-                                    self.node_manager.nodes[addr[0]]['monitor'] = msg.get('data')
-                                    self.log_callback(f"收到节点 {addr[0]} 的监控数据: CPU={msg.get('data', {}).get('cpu_percent', 0):.2f}%")
-                                else:
-                                    # 如果节点不存在，先添加节点
-                                    self.node_manager.add_node(addr[0], msg.get('data', {}).get('os', 'Unknown'), {})
-                                    self.node_manager.nodes[addr[0]]['monitor'] = msg.get('data')
-                                    self.log_callback(f"收到新节点 {addr[0]} 的监控数据")
-                            break
-                    except json.JSONDecodeError:
-                        # 数据还没接收完整，继续接收
-                        continue
-            except socket.timeout:
-                # 超时，尝试解析已接收的数据
-                if data:
-                    try:
-                        msg = json.loads(data.decode('utf-8'))
-                        if msg.get('type') == 'monitor_data':
-                            with self.node_manager.lock:
-                                if addr[0] in self.node_manager.nodes:
-                                    self.node_manager.nodes[addr[0]]['monitor'] = msg.get('data')
-                                    self.log_callback(f"收到节点 {addr[0]} 的监控数据（超时后）")
-                    except:
-                        self.log_callback(f"接收节点 {addr[0]} 监控数据超时或数据不完整")
+            msg = recv_json(conn, timeout=CONNECT_TIMEOUT)
+            if msg.get('type') == MsgType.MONITOR_DATA:
+                with self.node_manager.lock:
+                    if addr[0] in self.node_manager.nodes:
+                        self.node_manager.nodes[addr[0]]['monitor'] = msg.get('data')
+                        cpu = msg.get('data', {}).get('cpu_percent', 0)
+                        self.log_callback(f"收到节点 {addr[0]} 的监控数据: CPU={cpu:.2f}%")
+                    else:
+                        self.node_manager.add_node(addr[0], msg.get('data', {}).get('os', 'Unknown'), {})
+                        self.node_manager.nodes[addr[0]]['monitor'] = msg.get('data')
+                        self.log_callback(f"收到新节点 {addr[0]} 的监控数据")
+        except (socket.timeout, ConnectionError):
+            self.log_callback(f"接收节点 {addr[0]} 监控数据超时或数据不完整")
         except Exception as e:
             self.log_callback(f"处理监控数据错误 {addr[0]}: {e}")
         finally:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
     
-    def send_command(self, target_ip, command, params=None):
+    def send_command(self, target_ip: str, command: str,
+                      params: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """向指定节点发送命令"""
         try:
-            # 连接客户端的监听端口（默认8887）
-            client_port = 8887
-            self.log_callback(f"尝试连接节点 {target_ip}:{client_port} 发送命令: {command}")
+            self.log_callback(f"尝试连接节点 {target_ip}:{CLIENT_LISTEN_PORT} 发送命令: {command}")
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)  # 增加超时时间
-            sock.connect((target_ip, client_port))
-            self.log_callback(f"已连接到节点 {target_ip}:{client_port}")
-            
-            msg = {
-                'type': 'command',
+            sock.settimeout(CONNECT_TIMEOUT)
+            sock.connect((target_ip, CLIENT_LISTEN_PORT))
+            self.log_callback(f"已连接到节点 {target_ip}:{CLIENT_LISTEN_PORT}")
+
+            send_json(sock, {
+                'type': MsgType.COMMAND,
                 'command': command,
                 'params': params or {}
-            }
-            msg_data = json.dumps(msg).encode('utf-8')
-            sock.sendall(msg_data)  # 使用sendall确保数据完整发送
+            })
             self.log_callback(f"命令已发送到节点 {target_ip}")
-            
-            # 接收响应
-            response_data = b''
-            sock.settimeout(30)  # 增加超时时间，因为备份操作可能需要较长时间
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response_data += chunk
-                # 尝试解析JSON，如果成功说明数据接收完整
-                try:
-                    response = json.loads(response_data.decode('utf-8'))
-                    self.log_callback(f"收到节点 {target_ip} 的响应: {response}")
-                    sock.close()
-                    return response
-                except json.JSONDecodeError:
-                    continue
-            
+
+            response = recv_json(sock, timeout=COMMAND_TIMEOUT)
+            self.log_callback(f"收到节点 {target_ip} 的响应: {response}")
             sock.close()
-            if response_data:
-                try:
-                    return json.loads(response_data.decode('utf-8'))
-                except json.JSONDecodeError as e:
-                    self.log_callback(f"解析节点 {target_ip} 响应失败: {e}, 原始数据: {response_data[:200]}")
-                    return None
-            self.log_callback(f"节点 {target_ip} 未返回响应数据")
-            return None
+            return response
         except socket.timeout:
-            self.log_callback(f"连接节点 {target_ip}:8887 超时")
+            self.log_callback(f"连接节点 {target_ip}:{CLIENT_LISTEN_PORT} 超时")
             return None
         except ConnectionRefusedError:
-            self.log_callback(f"节点 {target_ip}:8887 拒绝连接，请检查客户端是否运行")
+            self.log_callback(f"节点 {target_ip}:{CLIENT_LISTEN_PORT} 拒绝连接，请检查客户端是否运行")
+            return None
+        except ConnectionError:
+            self.log_callback(f"节点 {target_ip} 未返回响应数据")
             return None
         except Exception as e:
-            self.log_callback(f"发送命令到 {target_ip}:8887 失败: {e}")
+            self.log_callback(f"发送命令到 {target_ip}:{CLIENT_LISTEN_PORT} 失败: {e}")
             return None
     
-    def send_file(self, target_ip, file_path, remote_path):
+    def send_file(self, target_ip: str, file_path: str,
+                   remote_path: str) -> dict[str, Any] | None:
         """向指定节点发送文件（支持任意类型）"""
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # 优化TCP性能：设置发送缓冲区大小和禁用Nagle算法
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)  # 1MB发送缓冲区
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # 禁用Nagle算法，减少延迟
-            
-            # 根据文件大小动态设置超时时间（每MB增加1秒，最少60秒，最多300秒）
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
             file_size = os.path.getsize(file_path) if Path(file_path).is_file() else 0
-            timeout = max(60, min(300, 60 + (file_size // (1024 * 1024))))
+            timeout = max(60, min(FILE_TRANSFER_TIMEOUT, 60 + (file_size // (1024 * 1024))))
             sock.settimeout(timeout)
-            
-            # 连接客户端的监听端口（默认8887）
-            client_port = 8887
-            sock.connect((target_ip, client_port))
-            
+
+            sock.connect((target_ip, CLIENT_LISTEN_PORT))
+
             path = Path(file_path)
-            
             if not path.is_file():
                 self.log_callback(f"错误：{file_path} 不是文件")
-                if sock:
-                    sock.close()
+                sock.close()
                 return {'status': 'error', 'message': '选择的路径不是文件'}
-            
-            # 发送单个文件（支持任意类型）
-            msg = {
-                'type': 'file_update',
+
+            send_json(sock, {
+                'type': MsgType.FILE_UPDATE,
                 'update_type': 'single_file',
                 'remote_path': remote_path,
                 'file_size': file_size,
                 'is_zip': False
-            }
-            sock.sendall(json.dumps(msg).encode('utf-8'))
-            
-            # 等待确认（设置超时）
-            sock.settimeout(10)
+            })
+
+            sock.settimeout(CONNECT_TIMEOUT)
             ack = sock.recv(1024).decode('utf-8')
             if ack == 'ready':
-                # 发送文件内容（使用sendall确保完整发送）
-                # 使用更大的缓冲区（128KB）减少系统调用次数，提升传输速度
-                BUFFER_SIZE = 131072  # 128KB
                 sent = 0
                 last_log_percent = 0
                 with open(file_path, 'rb') as f:
                     while sent < file_size:
-                        data = f.read(BUFFER_SIZE)
+                        data = f.read(FILE_BUFFER_SIZE)
                         if not data:
                             break
-                        sock.sendall(data)  # 使用sendall确保完整发送
+                        sock.sendall(data)
                         sent += len(data)
-                        # 减少日志记录频率：每5%记录一次，避免频繁日志影响性能
                         current_percent = sent * 100 // file_size
                         if current_percent >= last_log_percent + 5 or sent == file_size:
                             self.log_callback(f"已发送 {sent}/{file_size} 字节 ({current_percent}%)")
                             last_log_percent = current_percent
-            
-            # 接收响应（设置超时）
-            sock.settimeout(30)
-            response_data = b''
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response_data += chunk
-                # 尝试解析JSON，如果成功说明数据接收完整
-                try:
-                    response = json.loads(response_data.decode('utf-8'))
-                    if sock:
-                        sock.close()
-                    return response
-                except json.JSONDecodeError:
-                    continue
-            
-            if sock:
-                sock.close()
-            if response_data:
-                return json.loads(response_data.decode('utf-8'))
-            return None
+
+            response = recv_json(sock, timeout=COMMAND_TIMEOUT)
+            sock.close()
+            return response
         except socket.timeout:
             self.log_callback(f"发送文件到 {target_ip} 超时")
             if sock:
                 try:
                     sock.close()
-                except:
+                except Exception:
                     pass
             return {'status': 'error', 'message': '文件传输超时'}
         except Exception as e:
@@ -378,109 +292,69 @@ class NetworkManager:
             if sock:
                 try:
                     sock.close()
-                except:
+                except Exception:
                     pass
             return {'status': 'error', 'message': str(e)}
     
-    def send_command_to_multiple(self, target_ips, command, params=None):
+    def send_command_to_multiple(self, target_ips: list[str], command: str,
+                                  params: dict[str, Any] | None = None) -> dict[str, Any]:
         """向多个节点发送命令（并发）"""
-        results = {}
-        threads = []
-        results_lock = threading.Lock()
-        
-        def send_to_single(ip):
-            result = self.send_command(ip, command, params)
-            with results_lock:
-                results[ip] = result
-        
-        for ip in target_ips:
-            thread = threading.Thread(target=send_to_single, args=(ip,), daemon=True)
-            thread.start()
-            threads.append(thread)
-        
-        # 等待所有线程完成
-        for thread in threads:
-            thread.join(timeout=60)
-        
-        return results
-    
-    def send_file_to_multiple(self, target_ips, file_path, remote_path):
+        return broadcast(
+            target_ips,
+            lambda ip: self.send_command(ip, command, params),
+            timeout=COMMAND_TIMEOUT
+        )
+
+    def send_file_to_multiple(self, target_ips: list[str], file_path: str,
+                               remote_path: str) -> dict[str, Any]:
         """向多个节点发送文件（并发）"""
-        results = {}
-        threads = []
-        results_lock = threading.Lock()
-        
-        def send_to_single(ip):
-            result = self.send_file(ip, file_path, remote_path)
-            with results_lock:
-                results[ip] = result
-        
-        for ip in target_ips:
-            thread = threading.Thread(target=send_to_single, args=(ip,), daemon=True)
-            thread.start()
-            threads.append(thread)
-        
-        # 等待所有线程完成
-        for thread in threads:
-            thread.join(timeout=300)
-        
-        return results
-    
-    def execute_remote_command(self, target_ip, cmd, timeout=30):
+        return broadcast(
+            target_ips,
+            lambda ip: self.send_file(ip, file_path, remote_path),
+            timeout=FILE_TRANSFER_TIMEOUT
+        )
+
+    def execute_remote_command(self, target_ip: str, cmd: str,
+                                timeout: int = 30) -> dict[str, Any] | None:
         """在远程节点执行命令"""
         return self.send_command(target_ip, 'execute_command', {'cmd': cmd, 'timeout': timeout})
-    
-    def execute_remote_command_on_multiple(self, target_ips, cmd, timeout=30):
+
+    def execute_remote_command_on_multiple(self, target_ips: list[str], cmd: str,
+                                            timeout: int = 30) -> dict[str, Any]:
         """在多个远程节点执行命令（并发）"""
         return self.send_command_to_multiple(target_ips, 'execute_command', {'cmd': cmd, 'timeout': timeout})
     
-    def get_remote_system_info(self, target_ip):
+    def get_remote_system_info(self, target_ip: str) -> dict[str, Any] | None:
         """获取远程节点系统信息"""
         return self.send_command(target_ip, 'get_system_info', {})
 
     # ==================== 更新相关方法 ====================
 
-    def check_client_version(self, target_ip):
+    def check_client_version(self, target_ip: str) -> dict[str, Any] | None:
         """检查客户端版本"""
         return self.send_command(target_ip, 'get_version', {})
 
-    def get_client_files_manifest(self, target_ip):
+    def get_client_files_manifest(self, target_ip: str) -> dict[str, Any] | None:
         """获取客户端文件清单"""
         return self.send_command(target_ip, 'get_files_manifest', {})
 
-    def push_update_to_client(self, target_ip, update_data, new_version, update_type='incremental'):
-        """
-        推送更新到客户端
-
-        Args:
-            target_ip: 目标节点IP
-            update_data: 更新数据（bytes或dict）
-            new_version: 新版本号
-            update_type: 更新类型 'incremental' 或 'full'
-
-        Returns:
-            dict: 更新结果
-        """
+    def push_update_to_client(self, target_ip: str, update_data: bytes | dict[str, Any],
+                               new_version: str, update_type: str = 'incremental') -> dict[str, Any]:
+        """推送更新到客户端"""
         try:
-            # 客户端监听端口（默认8887）
-            client_port = 8887
-
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(300)  # 5分钟超时
-            self.log_callback(f"尝试连接客户端 {target_ip}:{client_port} 推送更新...")
-            sock.connect((target_ip, client_port))
+            sock.settimeout(FILE_TRANSFER_TIMEOUT)
+            self.log_callback(f"尝试连接客户端 {target_ip}:{CLIENT_LISTEN_PORT} 推送更新...")
+            sock.connect((target_ip, CLIENT_LISTEN_PORT))
 
-            # 发送更新请求
-            msg = {
-                'type': 'update',
+            send_json(sock, {
+                'type': MsgType.UPDATE,
                 'version': new_version,
                 'update_type': update_type
-            }
-            sock.sendall(json.dumps(msg).encode('utf-8'))
+            })
             self.log_callback(f"已发送更新请求到 {target_ip}")
 
-            # 等待客户端准备就绪
-            sock.settimeout(30)
+            sock.settimeout(COMMAND_TIMEOUT)
             ack = sock.recv(1024).decode('utf-8')
             if ack != 'ready':
                 sock.close()
@@ -488,13 +362,9 @@ class NetworkManager:
 
             self.log_callback(f"客户端 {target_ip} 已准备就绪，开始发送更新数据...")
 
-            # 发送更新数据
             if update_type == 'full':
-                # 全量更新：发送zip文件
                 sock.sendall(update_data)
             else:
-                # 增量更新：发送JSON
-                # 将bytes数据编码为base64
                 import base64
                 encoded_data = {}
                 for file_path, content in update_data.items():
@@ -505,30 +375,11 @@ class NetworkManager:
                 sock.sendall(json.dumps(encoded_data).encode('utf-8'))
 
             self.log_callback(f"更新数据已发送到 {target_ip}，等待响应...")
-
-            # 关闭发送端，让客户端知道数据已发送完毕
             sock.shutdown(socket.SHUT_WR)
 
-            # 接收响应
-            sock.settimeout(60)
-            response_data = b''
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                response_data += chunk
-
+            response = recv_json(sock, timeout=60)
             sock.close()
-
-            if response_data:
-                try:
-                    response = json.loads(response_data.decode('utf-8'))
-                    return response
-                except json.JSONDecodeError:
-                    return {'status': 'error', 'message': '响应解析失败'}
-
-            return {'status': 'error', 'message': '未收到客户端响应'}
-
+            return response
         except socket.timeout:
             return {'status': 'error', 'message': '连接超时'}
         except ConnectionRefusedError:
@@ -536,29 +387,16 @@ class NetworkManager:
         except Exception as e:
             return {'status': 'error', 'message': f'推送更新失败: {str(e)}'}
 
-    def push_update_to_multiple(self, target_ips, update_data, new_version, update_type='incremental'):
+    def push_update_to_multiple(self, target_ips: list[str], update_data: bytes | dict[str, Any],
+                                 new_version: str, update_type: str = 'incremental') -> dict[str, Any]:
         """向多个客户端推送更新（并发）"""
-        results = {}
-        threads = []
-        results_lock = threading.Lock()
+        return broadcast(
+            target_ips,
+            lambda ip: self.push_update_to_client(ip, update_data, new_version, update_type),
+            timeout=FILE_TRANSFER_TIMEOUT
+        )
 
-        def push_to_single(ip):
-            result = self.push_update_to_client(ip, update_data, new_version, update_type)
-            with results_lock:
-                results[ip] = result
-
-        for ip in target_ips:
-            thread = threading.Thread(target=push_to_single, args=(ip,), daemon=True)
-            thread.start()
-            threads.append(thread)
-
-        # 等待所有线程完成
-        for thread in threads:
-            thread.join(timeout=300)
-
-        return results
-
-    def stop(self):
+    def stop(self) -> None:
         self.running = False
         if self.command_socket:
             self.command_socket.close()
