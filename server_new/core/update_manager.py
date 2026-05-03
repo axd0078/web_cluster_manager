@@ -8,6 +8,7 @@
 import os
 import json
 import hashlib
+import shutil
 import zipfile
 import threading
 import time
@@ -276,7 +277,6 @@ class UpdateManager:
         return sorted(versions, reverse=True)
 
     def delete_version(self, version: str) -> dict[str, Any]:
-        import shutil
         try:
             version_dir = self.updates_dir / f'v{version}'
             zip_path = self.updates_dir / f'client_v{version}.zip'

@@ -1,0 +1,9 @@
+{
+    "server_url": "ws://localhost:8000",
+    "node_id": "agent-001",
+    "token": "dev-agent-token-change-in-production",
+    "heartbeat_interval": 10,
+    "monitor_interval": 5,
+    "reconnect_min_delay": 1,
+    "reconnect_max_delay": 60
+}

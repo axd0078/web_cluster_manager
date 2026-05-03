@@ -10,8 +10,21 @@ import logging
 import zipfile
 import io
 import subprocess
+import traceback
 import platform
+import psutil
 from pathlib import Path
+
+from shared.protocol import (
+    STREAM_BUFFER_SIZE,
+    FILE_BUFFER_SIZE,
+    CONNECT_TIMEOUT,
+    COMMAND_TIMEOUT,
+    FILE_TRANSFER_TIMEOUT,
+    MsgType,
+    send_json,
+    recv_json,
+)
 
 
 class TaskExecutor:
@@ -143,55 +156,40 @@ class TaskExecutor:
             # 发送备份文件到服务端
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(300)  # 5分钟超时
-                
+                sock.settimeout(FILE_TRANSFER_TIMEOUT)
+
                 # 连接到服务端命令端口
                 sock.connect((server_ip, server_command_port))
-                
+
                 # 发送备份文件请求
-                msg = {
-                    'type': 'backup_file',
+                send_json(sock, {
+                    'type': MsgType.BACKUP_FILE,
                     'folder_name': folder_name,
                     'file_size': zip_size
-                }
-                sock.sendall(json.dumps(msg).encode('utf-8'))
-                
+                })
+
                 # 等待服务端准备就绪
-                sock.settimeout(10)
+                sock.settimeout(CONNECT_TIMEOUT)
                 ack = sock.recv(1024).decode('utf-8')
                 if ack != 'ready':
                     sock.close()
                     return {'status': 'error', 'message': f'服务端未准备就绪: {ack}'}
-                
+
                 # 发送压缩文件数据
-                sock.settimeout(300)
-                BUFFER_SIZE = 131072  # 128KB
+                sock.settimeout(FILE_TRANSFER_TIMEOUT)
                 sent = 0
                 while sent < zip_size:
-                    chunk = zip_data[sent:sent + BUFFER_SIZE]
+                    chunk = zip_data[sent:sent + FILE_BUFFER_SIZE]
                     sock.sendall(chunk)
                     sent += len(chunk)
-                
+
                 # 接收响应
-                sock.settimeout(30)
-                response_data = b''
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    response_data += chunk
-                    try:
-                        response = json.loads(response_data.decode('utf-8'))
-                        sock.close()
-                        if response.get('status') == 'success':
-                            return {'status': 'success', 'message': '备份文件已发送到服务端'}
-                        else:
-                            return {'status': 'error', 'message': f"服务端接收失败: {response.get('message', '未知错误')}"}
-                    except json.JSONDecodeError:
-                        continue
-                
+                response = recv_json(sock, timeout=COMMAND_TIMEOUT)
                 sock.close()
-                return {'status': 'error', 'message': '未收到服务端响应'}
+                if response.get('status') == 'success':
+                    return {'status': 'success', 'message': '备份文件已发送到服务端'}
+                else:
+                    return {'status': 'error', 'message': f"服务端接收失败: {response.get('message', '未知错误')}"}
                 
             except socket.timeout:
                 return {'status': 'error', 'message': '连接服务端超时'}
@@ -201,7 +199,6 @@ class TaskExecutor:
                 return {'status': 'error', 'message': f'发送备份文件失败: {str(e)}'}
                     
         except Exception as e:
-            import traceback
             error_detail = traceback.format_exc()
             return {'status': 'error', 'message': f'备份失败: {str(e)}'}
     
@@ -243,7 +240,7 @@ class TaskExecutor:
         except Exception as e:
             return {'status': 'error', 'message': f'文件保存失败: {str(e)}'}
     
-    def execute_command(self, command, timeout=30):
+    def execute_command(self, command, timeout=COMMAND_TIMEOUT):
         """执行远程命令"""
         try:
             # 安全检查：禁止危险命令
@@ -321,7 +318,6 @@ class TaskExecutor:
     def get_system_info(self):
         """获取系统详细信息"""
         try:
-            import psutil
             cpu_count = psutil.cpu_count(logical=True)
             cpu_count_physical = psutil.cpu_count(logical=False)
             memory = psutil.virtual_memory()

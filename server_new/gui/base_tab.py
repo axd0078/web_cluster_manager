@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """GUI 标签页基类。"""
 
+import threading
 import tkinter as tk
 from tkinter import ttk
 from typing import Any, Callable
@@ -60,7 +61,6 @@ class BaseTab:
         return self.services.node_manager.get_all_nodes()
 
     def run_async(self, fn: Callable[[], None]) -> None:
-        import threading
         threading.Thread(target=fn, daemon=True).start()
 
     def schedule(self, delay_ms: int, fn: Callable[[], None]) -> None:

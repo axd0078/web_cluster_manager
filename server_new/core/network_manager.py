@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import base64
 import socket
 import threading
+import traceback
 import json
 import os
 from pathlib import Path
@@ -101,7 +103,6 @@ class NetworkManager:
             self.log_callback(f"接收命令失败: {addr[0]} - {e}")
         except Exception as e:
             self.log_callback(f"处理命令错误: {e}")
-            import traceback
             self.log_callback(f"错误详情: {traceback.format_exc()}")
         finally:
             if msg and msg.get('type') != MsgType.BACKUP_FILE:
@@ -162,7 +163,6 @@ class NetworkManager:
             send_json(conn, {'status': 'success', 'message': '备份文件已接收'})
         except Exception as e:
             self.log_callback(f"接收备份文件错误: {e}")
-            import traceback
             self.log_callback(f"错误详情: {traceback.format_exc()}")
             try:
                 send_json(conn, {'status': 'error', 'message': str(e)})
@@ -287,7 +287,6 @@ class NetworkManager:
             return {'status': 'error', 'message': '文件传输超时'}
         except Exception as e:
             self.log_callback(f"发送文件到 {target_ip} 失败: {e}")
-            import traceback
             self.log_callback(f"错误详情: {traceback.format_exc()}")
             if sock:
                 try:
@@ -365,7 +364,6 @@ class NetworkManager:
             if update_type == 'full':
                 sock.sendall(update_data)
             else:
-                import base64
                 encoded_data = {}
                 for file_path, content in update_data.items():
                     if isinstance(content, bytes):

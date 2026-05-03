@@ -317,9 +317,16 @@ class ClientUpdater:
         try:
             # update_data 应该是 dict: {文件路径: 文件内容(bytes)}
             updated_files = []
+            skipped_files = []
             failed_files = []
+            preserve_config_files = {'config.json'}  # 保留用户自定义的配置文件
 
             for file_path, content in update_data.items():
+                # 跳过用户配置文件（保留本地配置）
+                if file_path in preserve_config_files:
+                    skipped_files.append(file_path)
+                    continue
+
                 try:
                     target_path = self.client_dir / file_path
                     target_path.parent.mkdir(parents=True, exist_ok=True)
