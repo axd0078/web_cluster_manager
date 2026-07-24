@@ -1,0 +1,46 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    environment:
+      WCM_ENVIRONMENT: production
+      WCM_DEBUG: "false"
+      WCM_COOKIE_SECURE: "true"
+      WCM_JWT_SECRET_FILE: /run/secrets/jwt_secret
+      WCM_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+      WCM_BOOTSTRAP_ADMIN_USERNAME: ${WCM_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      WCM_CORS_ORIGINS: '["https://${WCM_PUBLIC_HOST}"]'
+      WCM_TRUSTED_HOSTS: '["${WCM_PUBLIC_HOST}","app"]'
+    expose:
+      - "8000"
+    volumes:
+      - wcm-data:/app/server/data
+      - wcm-updates:/app/server/updates
+      - wcm-logs:/app/server/logs
+    secrets:
+      - jwt_secret
+      - bootstrap_admin_password
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+
+volumes:
+  wcm-data:
+  wcm-updates:
+  wcm-logs:
+
+secrets:
+  jwt_secret:
+    file: ./secrets/jwt_secret.txt
+  bootstrap_admin_password:
+    file: ./secrets/bootstrap_admin_password.txt
