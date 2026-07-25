@@ -35,6 +35,7 @@ from database import async_session, engine, init_db
 from models.user import User
 from services.node_service import NodeService
 from services.file_transfer_service import file_transfer_service
+from services.task_service import task_service
 
 
 def _validate_production_settings() -> None:
@@ -94,13 +95,15 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _bootstrap_admin()
     await file_transfer_service.recover_stale()
+    await task_service.recover_after_restart()
     stale_task = asyncio.create_task(_stale_node_loop())
     cleanup_task = asyncio.create_task(file_transfer_service.cleanup_loop())
+    task_cleanup_task = asyncio.create_task(task_service.cleanup_loop())
     app.state.startup_complete = True
     yield
-    for task in (stale_task, cleanup_task):
+    for task in (stale_task, cleanup_task, task_cleanup_task):
         task.cancel()
-    for task in (stale_task, cleanup_task):
+    for task in (stale_task, cleanup_task, task_cleanup_task):
         with contextlib.suppress(asyncio.CancelledError):
             await task
     await engine.dispose()

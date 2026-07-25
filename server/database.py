@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import sqlite3
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -12,7 +11,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from config import settings
 
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -136,6 +135,60 @@ async def init_db():
                 text("INSERT INTO schema_migrations(version, applied_at) VALUES (5, :now)"),
                 {"now": datetime.now(timezone.utc)},
             )
+        result = await conn.execute(text("SELECT version FROM schema_migrations WHERE version = 6"))
+        if result.scalar_one_or_none() is None:
+            task_columns = await conn.execute(text("PRAGMA table_info(tasks)"))
+            existing_tasks = {row[1] for row in task_columns.fetchall()}
+            task_additions = {
+                "started": "DATETIME",
+                "updated": "DATETIME",
+            }
+            for name, definition in task_additions.items():
+                if name not in existing_tasks:
+                    await conn.execute(text(f"ALTER TABLE tasks ADD COLUMN {name} {definition}"))
+
+            subtask_columns = await conn.execute(text("PRAGMA table_info(subtasks)"))
+            existing_subtasks = {row[1] for row in subtask_columns.fetchall()}
+            subtask_additions = {
+                "execution_id": "VARCHAR(36)",
+                "attempts": "INTEGER NOT NULL DEFAULT 0",
+                "progress": "INTEGER NOT NULL DEFAULT 0",
+                "message": "VARCHAR(500)",
+                "error": "TEXT",
+            }
+            for name, definition in subtask_additions.items():
+                if name not in existing_subtasks:
+                    await conn.execute(text(
+                        f"ALTER TABLE subtasks ADD COLUMN {name} {definition}"
+                    ))
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_subtasks_execution_id "
+                "ON subtasks(execution_id)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_subtasks_status ON subtasks(status)"
+            ))
+            now = datetime.now(timezone.utc)
+            await conn.execute(
+                text("UPDATE tasks SET updated = COALESCE(updated, created, :now)"),
+                {"now": now},
+            )
+            await conn.execute(text(
+                "UPDATE subtasks SET status='paused', "
+                "error=COALESCE(error, 'Server restarted before task completion') "
+                "WHERE status IN ('pending', 'running')"
+            ))
+            await conn.execute(
+                text(
+                    "UPDATE tasks SET status='paused', updated=:now "
+                    "WHERE status IN ('pending', 'running')"
+                ),
+                {"now": now},
+            )
+            await conn.execute(
+                text("INSERT INTO schema_migrations(version, applied_at) VALUES (6, :now)"),
+                {"now": now},
+            )
 
 
 def _backup_before_migration() -> None:
@@ -161,8 +214,10 @@ def _backup_before_migration() -> None:
 
     backup_dir = Path(settings.DATA_DIR) / "backups"
     backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    shutil.copy2(
-        db_path,
-        backup_dir / f"cluster_pre_v{CURRENT_SCHEMA_VERSION}_{stamp}.db",
-    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+    backup_path = backup_dir / f"cluster_pre_v{CURRENT_SCHEMA_VERSION}_{stamp}.db"
+    # SQLite's online backup API includes committed WAL pages and produces a
+    # transactionally consistent copy. Copying only cluster.db could silently
+    # omit committed data still present in cluster.db-wal.
+    with sqlite3.connect(db_path) as source, sqlite3.connect(backup_path) as destination:
+        source.backup(destination)

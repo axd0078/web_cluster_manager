@@ -119,7 +119,9 @@ async def enroll_agent(
     node.platform = body.platform
     node.version = body.version
     node.capabilities = json.dumps(body.capabilities)
-    node.status = "online"
+    # Enrollment proves possession of a one-time token, not an active Agent
+    # WebSocket. The WebSocket handshake is what marks the node online.
+    node.status = "offline"
     node.last_seen = now
     node.credential_state = "active"
     await db.flush()

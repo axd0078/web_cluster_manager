@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
@@ -10,10 +11,11 @@ from sqlalchemy import select
 from config import settings
 from core.connection_manager import FrontendPrincipal, manager
 from core.security import decode_token
-from core.task_engine import task_engine
 from database import async_session
+from models.node import Node
 from models.user import User
 from services.agent_service import authenticate_agent_token, mark_node_offline
+from services.task_service import task_service
 
 router = APIRouter(tags=["websocket"])
 
@@ -78,6 +80,12 @@ async def agent_ws(ws: WebSocket):
 
     await ws.accept()
     await manager.agent_connect(ws, node.id)
+    async with async_session() as db:
+        current = await db.scalar(select(Node).where(Node.id == node.id))
+        if current:
+            current.status = "online"
+            current.last_seen = datetime.now(timezone.utc)
+            await db.commit()
     try:
         while True:
             raw = await ws.receive_text()
@@ -99,13 +107,50 @@ async def agent_ws(ws: WebSocket):
                 await manager.handle_monitor_data(node.id, payload)
             elif msg_type == "container_inventory":
                 await manager.handle_container_inventory(node.id, payload)
-            elif msg_type == "task_result":
-                await task_engine.handle_task_result(node.id, request_id, payload)
+            elif msg_type == "agent_capabilities":
+                protocol = payload.get("task_protocol")
+                raw_profiles = payload.get("task_profiles")
+                if protocol != 2 or not isinstance(raw_profiles, dict):
+                    continue
+                allowed_keys = {
+                    "clean_logs", "backup_files", "restart_service", "batch_command",
+                }
+                profiles: dict[str, list[str]] = {}
+                for key in allowed_keys:
+                    values = raw_profiles.get(key, [])
+                    if not isinstance(values, list):
+                        values = []
+                    profiles[key] = sorted({
+                        value for value in values
+                        if isinstance(value, str)
+                        and 0 < len(value) <= 64
+                        and all(ch.isalnum() or ch in "_.-" for ch in value)
+                    })
+                async with async_session() as db:
+                    current = await db.scalar(select(Node).where(Node.id == node.id))
+                    if current:
+                        try:
+                            capabilities = json.loads(current.capabilities or "{}")
+                        except json.JSONDecodeError:
+                            capabilities = {}
+                        if not isinstance(capabilities, dict):
+                            capabilities = {}
+                        capabilities["task_protocol"] = 2
+                        capabilities["task_profiles"] = profiles
+                        current.capabilities = json.dumps(capabilities, sort_keys=True)
+                        await db.commit()
+            elif msg_type == "task_ack":
                 manager.resolve_request(node.id, request_id, payload)
+            elif msg_type == "task_progress":
+                await task_service.handle_progress(node.id, request_id, payload)
+            elif msg_type == "task_result":
+                await task_service.handle_result(node.id, request_id, payload)
                 await manager.broadcast_to_frontends(
                     _task_result_event(node.id, request_id, payload),
-                    allowed_roles={"admin", "operator"},
+                    allowed_roles={"admin"},
                 )
+            elif msg_type == "task_cancel_ack":
+                manager.resolve_request(node.id, request_id, payload)
             elif msg_type == "file_transfer_result":
                 # Chunk acknowledgements are internal request/response traffic.
                 # Only the transfer service emits sanitized aggregate progress.
@@ -133,6 +178,7 @@ async def agent_ws(ws: WebSocket):
         await manager.agent_disconnect(ws)
         if node.id not in manager.get_connected_agents():
             await mark_node_offline(node.id)
+            await task_service.pause_node_tasks(node.id)
 
 
 @router.websocket("/ws/frontend")

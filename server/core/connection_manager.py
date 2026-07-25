@@ -146,7 +146,11 @@ class ConnectionManager:
                 await self.authenticated_disconnect(ws)
 
     async def broadcast_to_frontends(
-        self, data: dict, allowed_roles: set[str] | None = None,
+        self,
+        data: dict,
+        allowed_roles: set[str] | None = None,
+        allowed_user_ids: set[str] | None = None,
+        unrestricted_roles: set[str] | None = None,
     ) -> None:
         dead: set[WebSocket] = set()
         now = time.time()
@@ -163,6 +167,12 @@ class ConnectionManager:
                 dead.add(ws)
                 continue
             if allowed_roles is not None and principal.role not in allowed_roles:
+                continue
+            if (
+                allowed_user_ids is not None
+                and principal.user_id not in allowed_user_ids
+                and principal.role not in (unrestricted_roles or set())
+            ):
                 continue
             try:
                 await ws.send_json(data)

@@ -9,7 +9,10 @@ import ssl
 
 import websockets
 
-from config import AgentConfig
+try:
+    from .config import AgentConfig
+except ImportError:  # Script execution from the agent directory.
+    from config import AgentConfig
 
 logger = logging.getLogger("agent.connection")
 
@@ -24,9 +27,17 @@ class AgentConnection:
         self._ws = None
         self._running = False
         self._handlers: list = []
+        self._connect_handlers: list = []
+        self._disconnect_handlers: list = []
 
     def on_message(self, handler):
         self._handlers.append(handler)
+
+    def on_connect(self, handler):
+        self._connect_handlers.append(handler)
+
+    def on_disconnect(self, handler):
+        self._disconnect_handlers.append(handler)
 
     async def connect(self):
         headers = {"Authorization": f"Bearer {self.config.agent_token}"}
@@ -49,6 +60,8 @@ class AgentConnection:
                 self.config.server_url, extra_headers=headers, **kwargs,
             )
         logger.info("Connected to %s", self.config.server_url)
+        for handler in self._connect_handlers:
+            await handler()
 
     async def receive_loop(self):
         while self._running and self._ws:
@@ -88,6 +101,11 @@ class AgentConnection:
                 logger.warning("Connection failed (%s), reconnecting in %ss", exc, backoff)
             finally:
                 self._ws = None
+                for handler in self._disconnect_handlers:
+                    try:
+                        await handler()
+                    except Exception:
+                        logger.exception("Disconnect handler error")
             if self._running:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)

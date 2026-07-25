@@ -5,11 +5,18 @@ import json
 import re
 import shutil
 
-from process_output import (
-    ProcessExecutionTimeout,
-    ProcessOutputLimitError,
-    communicate_bounded,
-)
+try:
+    from .process_output import (
+        ProcessExecutionTimeout,
+        ProcessOutputLimitError,
+        communicate_bounded,
+    )
+except ImportError:  # Script execution from the agent directory.
+    from process_output import (
+        ProcessExecutionTimeout,
+        ProcessOutputLimitError,
+        communicate_bounded,
+    )
 
 _CONTAINER_ID = re.compile(r"^[0-9a-fA-F]{12,64}$")
 

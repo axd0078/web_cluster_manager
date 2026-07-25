@@ -29,9 +29,6 @@ class AgentConfig:
     enable_remote_commands: bool = field(
         default_factory=lambda: os.getenv("WCM_ENABLE_REMOTE_COMMANDS", "false").lower() == "true"
     )
-    remote_command_allowlist: list[str] = field(default_factory=lambda: [
-        value.strip() for value in os.getenv("WCM_REMOTE_COMMAND_ALLOWLIST", "").split(",") if value.strip()
-    ])
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("WCM_AGENT_DATA_DIR", "agent_data")))
     transfer_root: Path = field(default_factory=lambda: Path(os.getenv("WCM_TRANSFER_ROOT", "agent_data/transfers")))
     max_transfer_bytes: int = field(
@@ -54,6 +51,22 @@ class AgentConfig:
     )
     file_chunk_bytes: int = field(
         default_factory=lambda: int(os.getenv("WCM_FILE_CHUNK_BYTES", str(512 * 1024)))
+    )
+    task_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("WCM_TASK_CONCURRENCY", "2"))
+    )
+    task_backup_retention_days: int = field(
+        default_factory=lambda: int(os.getenv("WCM_TASK_BACKUP_RETENTION_DAYS", "90"))
+    )
+    task_backup_total_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_TASK_BACKUP_TOTAL_BYTES", str(2 * 1024 * 1024 * 1024))
+        )
+    )
+    task_backup_min_free_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_TASK_BACKUP_MIN_FREE_BYTES", str(256 * 1024 * 1024))
+        )
     )
 
     def save(self, path: Path) -> None:

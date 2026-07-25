@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "log_profiles": {
+    "application": {
+      "root": "/var/log/my-application",
+      "patterns": [
+        "*.log",
+        "*.log.*"
+      ]
+    }
+  },
+  "backup_profiles": {
+    "application-data": {
+      "root": "/srv/my-application/data"
+    }
+  },
+  "service_profiles": {
+    "web": {
+      "manager": "systemd",
+      "name": "nginx.service"
+    }
+  },
+  "command_profiles": {
+    "uptime": {
+      "argv": [
+        "/usr/bin/uptime"
+      ],
+      "timeout": 15
+    }
+  }
+}

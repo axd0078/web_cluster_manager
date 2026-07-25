@@ -152,13 +152,42 @@ def test_operator_cannot_read_cancel_or_retry_another_operators_task(client):
     admin_csrf = _login(client, "admin", "test-bootstrap-password")
     owner_id, owner_name, owner_password = _create_user(client, admin_csrf, "operator")
     _, other_name, other_password = _create_user(client, admin_csrf, "operator")
+    enrollment = client.post(
+        "/api/v2/agent-enrollment-tokens",
+        headers=admin_csrf,
+        json={"label": "task-ownership-test"},
+    )
+    token = enrollment.json()["token"]
+    enrolled = client.post(
+        "/api/v2/agents/enroll",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "agent_id": uuid.uuid4().hex,
+            "ip": f"10.20.0.{int(uuid.uuid4().hex[:2], 16) or 1}",
+            "hostname": "task-owner-agent",
+            "os": "Linux test",
+            "platform": "linux",
+            "version": "3.1.0",
+            "capabilities": {
+                "task_protocol": 2,
+                "task_profiles": {
+                    "clean_logs": [],
+                    "backup_files": [],
+                    "restart_service": [],
+                    "batch_command": [],
+                },
+            },
+        },
+    )
+    assert enrolled.status_code == 201, enrolled.text
+    node_id = enrolled.json()["node_id"]
 
     owner_csrf = _login(client, owner_name, owner_password)
     created = client.post("/api/v2/tasks/", headers=owner_csrf, json={
         "type": "health_check",
         "title": "owner-only-task",
         "params": {},
-        "target_node_ids": [],
+        "target_node_ids": [node_id],
     })
     assert created.status_code == 201, created.text
     task_id = created.json()["id"]
@@ -175,7 +204,7 @@ def test_operator_cannot_read_cancel_or_retry_another_operators_task(client):
     assert task_id not in {item["id"] for item in client.get("/api/v2/tasks/").json()}
 
     _login(client, "admin", "test-bootstrap-password")
-    assert client.get(f"/api/v2/tasks/{task_id}").json()["status"] == "pending"
+    assert client.get(f"/api/v2/tasks/{task_id}").json()["status"] in {"queued", "paused"}
 
 
 def test_viewer_cannot_read_another_users_file_transfer_history(client):

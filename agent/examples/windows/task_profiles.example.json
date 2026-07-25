@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "log_profiles": {
+    "application": {
+      "root": "C:\\ProgramData\\WCM\\logs",
+      "patterns": [
+        "*.log",
+        "*.log.*"
+      ]
+    }
+  },
+  "backup_profiles": {
+    "application-data": {
+      "root": "C:\\ProgramData\\WCM\\data"
+    }
+  },
+  "service_profiles": {
+    "print-spooler": {
+      "manager": "windows_service",
+      "name": "Spooler"
+    }
+  },
+  "command_profiles": {
+    "current-identity": {
+      "argv": [
+        "C:\\Windows\\System32\\whoami.exe"
+      ],
+      "timeout": 15
+    }
+  }
+}

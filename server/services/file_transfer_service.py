@@ -98,6 +98,8 @@ class FileTransferService:
             for upload in result.scalars().all():
                 cutoff = ready_cutoff if upload.status == "ready" else partial_cutoff
                 reference_time = upload.completed or upload.updated or upload.created
+                if reference_time and reference_time.tzinfo is None:
+                    reference_time = reference_time.replace(tzinfo=timezone.utc)
                 if reference_time and reference_time >= cutoff:
                     continue
                 if upload.status == "ready":

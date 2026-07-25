@@ -100,4 +100,13 @@ async def communicate_bounded(
         await asyncio.gather(*readers, return_exceptions=True)
         await _stop_process(process)
         raise
+    except asyncio.CancelledError:
+        operation.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await operation
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+        await _stop_process(process)
+        raise
     return bytes(stdout), bytes(stderr)

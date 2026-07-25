@@ -35,7 +35,11 @@ class Settings(BaseSettings):
     AGENT_HEARTBEAT_TIMEOUT: int = 90
     AGENT_ENROLLMENT_TTL_MINUTES: int = 15
     ENABLE_REMOTE_COMMANDS: bool = False
-    REMOTE_COMMAND_ALLOWLIST: list[str] = []
+    MAX_TASK_TARGETS: int = 32
+    TASK_ACK_TIMEOUT_SECONDS: int = 10
+    TASK_CANCEL_TIMEOUT_SECONDS: int = 10
+    TASK_PREVIEW_TTL_MINUTES: int = 30
+    TASK_RETENTION_DAYS: int = 90
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:8000"]

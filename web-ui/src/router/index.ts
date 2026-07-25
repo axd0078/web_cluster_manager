@@ -33,6 +33,7 @@ const router = createRouter({
           path: 'tasks',
           name: 'Tasks',
           component: () => import('../views/Tasks.vue'),
+          meta: { roles: ['admin', 'operator'] },
         },
         {
           path: 'files',
@@ -73,7 +74,10 @@ router.beforeEach(async to => {
   const user = useUserStore()
   await user.fetchUser()
   if (to.meta.public) return user.isAuthenticated ? '/' : true
-  return user.isAuthenticated ? true : '/login'
+  if (!user.isAuthenticated) return '/login'
+  const roles = to.meta.roles as string[] | undefined
+  if (roles && (!user.user || !roles.includes(user.user.role))) return '/'
+  return true
 })
 
 export default router

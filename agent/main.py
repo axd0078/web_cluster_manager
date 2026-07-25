@@ -12,13 +12,24 @@ from pathlib import Path
 
 import requests
 
-from config import AgentConfig
-from connection import AgentConnection, AgentCredentialRejected, get_local_ip, get_os_info
-from docker_runtime import DockerRuntime
-from executor import CommandExecutor
-from file_transfer import FileReceiver
-from monitor import SystemMonitor
-from updater import AgentUpdater
+try:
+    from .config import AgentConfig
+    from .connection import AgentConnection, AgentCredentialRejected, get_local_ip, get_os_info
+    from .docker_runtime import DockerRuntime
+    from .file_transfer import FileReceiver
+    from .monitor import SystemMonitor
+    from .task_profiles import TaskProfileStore
+    from .task_runner import AgentTaskRunner
+    from .updater import AgentUpdater
+except ImportError:  # Script execution from the agent directory.
+    from config import AgentConfig
+    from connection import AgentConnection, AgentCredentialRejected, get_local_ip, get_os_info
+    from docker_runtime import DockerRuntime
+    from file_transfer import FileReceiver
+    from monitor import SystemMonitor
+    from task_profiles import TaskProfileStore
+    from task_runner import AgentTaskRunner
+    from updater import AgentUpdater
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("agent")
@@ -28,7 +39,6 @@ class Agent:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.conn = AgentConnection(config)
-        self.executor = CommandExecutor(config.enable_remote_commands, config.remote_command_allowlist)
         self.monitor = SystemMonitor()
         self.docker = DockerRuntime()
         self.file_receiver = FileReceiver(
@@ -40,35 +50,61 @@ class Agent:
             partial_ttl_seconds=config.transfer_partial_ttl_seconds,
         )
         self._last_docker_report = 0.0
+        self.task_profiles = TaskProfileStore(config.data_dir / "task_profiles.json")
+        self.task_runner = AgentTaskRunner(config, self.task_profiles, self._send_result)
         self.conn.on_message(self._handle_message)
+        self.conn.on_connect(self._send_capabilities)
+        self.conn.on_disconnect(self.task_runner.shutdown)
 
-    async def _send_result(self, message_type: str, request_id: str, payload: dict) -> None:
-        await self.conn.send({"type": message_type, "request_id": request_id, "payload": payload})
+    async def _send_result(self, message_type: str, request_id: str, payload: dict) -> bool:
+        return await self.conn.send({
+            "type": message_type,
+            "request_id": request_id,
+            "payload": payload,
+        })
 
     async def _handle_message(self, msg: dict):
         msg_type = str(msg.get("type") or "")
         request_id = str(msg.get("request_id") or "")
         payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
 
-        if msg_type in {"task", "command"}:
+        if msg_type == "task":
             task_type = str(payload.get("task_type") or msg.get("command") or "")
             params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-            if task_type in {"health_check", "get_system_info"}:
-                result = await self.executor.get_system_info()
-                result.update({"success": True, "version": self.config.version})
-            elif task_type == "start_monitor":
-                self.monitor.start()
-                result = {"success": True, "monitor": "started"}
-            elif task_type == "stop_monitor":
-                self.monitor.stop()
-                result = {"success": True, "monitor": "stopped"}
-            elif task_type == "batch_command":
-                result = await self.executor.execute(
-                    str(params.get("command") or ""), int(params.get("timeout", 30)),
+            error = self.task_runner.validate_request(
+                request_id,
+                task_id=str(payload.get("task_id") or ""),
+                subtask_id=str(payload.get("subtask_id") or ""),
+                task_type=task_type,
+                params=params,
+            )
+            accepted = error is None
+            acknowledged = await self._send_result("task_ack", request_id, {
+                "accepted": accepted,
+                "error": error,
+            })
+            if accepted and acknowledged:
+                started, start_error = self.task_runner.accept(
+                    request_id,
+                    task_id=str(payload.get("task_id") or ""),
+                    subtask_id=str(payload.get("subtask_id") or ""),
+                    task_type=task_type,
+                    params=params,
                 )
-            else:
-                result = {"success": False, "error": f"unsupported task: {task_type}"}
-            await self._send_result("task_result", request_id, result)
+                if not started:
+                    await self._send_result("task_result", request_id, {
+                        "success": False,
+                        "status": "failed",
+                        "error": start_error or "task could not be started",
+                        "message": "任务启动失败",
+                        "result": {},
+                    })
+
+        elif msg_type == "task_cancel":
+            cancelled = await self.task_runner.cancel(request_id)
+            await self._send_result("task_cancel_ack", request_id, {
+                "cancelled": cancelled,
+            })
 
         elif msg_type == "container_action":
             try:
@@ -113,6 +149,13 @@ class Agent:
         elif msg_type == "ping":
             await self.conn.send({"type": "pong", "request_id": request_id, "payload": {}})
 
+    async def _send_capabilities(self) -> None:
+        self.task_profiles.reload_if_changed()
+        await self.conn.send({
+            "type": "agent_capabilities",
+            "payload": self.task_profiles.capabilities(),
+        })
+
     async def enroll(self) -> bool:
         if not self.config.enrollment_token:
             logger.error("No valid Agent credential. Set WCM_ENROLLMENT_TOKEN to enroll this device.")
@@ -131,6 +174,7 @@ class Agent:
                 "docker": docker_available,
                 "remote_commands": self.config.enable_remote_commands,
                 "file_transfer_v2": True,
+                **self.task_profiles.capabilities(),
             },
         }
 
@@ -170,6 +214,10 @@ class Agent:
                     inventory = await self.docker.list_containers()
                     await self.conn.send({"type": "container_inventory", "payload": {"containers": inventory}})
                     self._last_docker_report = now
+                if self.task_profiles.reload_if_changed():
+                    if self.task_profiles.last_error:
+                        logger.error("Task profile reload failed: %s", self.task_profiles.last_error)
+                    await self._send_capabilities()
             except Exception:
                 logger.exception("Telemetry collection failed")
 
@@ -205,6 +253,21 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     config.data_dir = initial.data_dir
     config.transfer_root = initial.transfer_root
     config.enrollment_token = os.getenv("WCM_ENROLLMENT_TOKEN", "")
+    # Remote commands require an explicit opt-in on every Agent start. Capacity
+    # and concurrency environment variables intentionally override persisted
+    # defaults so operators can change limits without editing credentials.
+    config.enable_remote_commands = (
+        os.getenv("WCM_ENABLE_REMOTE_COMMANDS", "false").lower() == "true"
+    )
+    integer_overrides = {
+        "WCM_TASK_CONCURRENCY": "task_concurrency",
+        "WCM_TASK_BACKUP_RETENTION_DAYS": "task_backup_retention_days",
+        "WCM_TASK_BACKUP_TOTAL_BYTES": "task_backup_total_bytes",
+        "WCM_TASK_BACKUP_MIN_FREE_BYTES": "task_backup_min_free_bytes",
+    }
+    for environment_name, attribute in integer_overrides.items():
+        if environment_name in os.environ:
+            setattr(config, attribute, int(os.environ[environment_name]))
     if args.server:
         config.server_url = args.server
     if args.api:

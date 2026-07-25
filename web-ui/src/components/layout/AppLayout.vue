@@ -17,7 +17,7 @@ const nodeStore = useNodeStore()
 const isDark = ref(false)
 const isCollapsed = ref(false)
 
-const menuItems = [
+const allMenuItems = [
   { path: '/', title: '仪表盘', icon: HomeFilled },
   { path: '/nodes', title: '节点管理', icon: Monitor },
   { path: '/groups', title: '分组管理', icon: Grid },
@@ -29,6 +29,9 @@ const menuItems = [
   { path: '/audit', title: '审计日志', icon: Operation },
   { path: '/settings', title: '系统设置', icon: Setting },
 ]
+const menuItems = computed(() => allMenuItems.filter(item => (
+  item.path !== '/tasks' || userStore.user?.role !== 'viewer'
+)))
 
 const activeMenu = computed(() => {
   if (route.path === '/') return '/'
