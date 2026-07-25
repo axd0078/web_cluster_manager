@@ -47,12 +47,32 @@ class FileTransferService:
             return False
         task = asyncio.create_task(self._run_transfer(transfer_id, target_ids))
         self._jobs[transfer_id] = task
-        task.add_done_callback(lambda _task: self._jobs.pop(transfer_id, None))
+        task.add_done_callback(lambda finished: self._job_finished(transfer_id, finished))
         return True
+
+    def _job_finished(self, transfer_id: str, task: asyncio.Task) -> None:
+        self._jobs.pop(transfer_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "File transfer job failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     def is_running(self, transfer_id: str) -> bool:
         task = self._jobs.get(transfer_id)
         return task is not None and not task.done()
+
+    async def shutdown(self) -> None:
+        jobs = list(self._jobs.values())
+        for job in jobs:
+            job.cancel()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
+        self._jobs.clear()
+        await self.recover_stale()
 
     async def recover_stale(self) -> None:
         """Turn interrupted in-process jobs into resumable database state."""

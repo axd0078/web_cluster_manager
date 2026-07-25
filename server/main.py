@@ -106,6 +106,8 @@ async def lifespan(app: FastAPI):
     for task in (stale_task, cleanup_task, task_cleanup_task):
         with contextlib.suppress(asyncio.CancelledError):
             await task
+    await task_service.shutdown()
+    await file_transfer_service.shutdown()
     await engine.dispose()
 
 

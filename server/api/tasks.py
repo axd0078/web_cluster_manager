@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import PurePosixPath, PureWindowsPath
 
@@ -220,7 +219,7 @@ async def create_task(
     ))
     await db.commit()
     response = await _task_response(db, task, user.username)
-    asyncio.create_task(task_service.dispatch_task(task.id))
+    task_service.schedule_dispatch(task.id)
     return response
 
 

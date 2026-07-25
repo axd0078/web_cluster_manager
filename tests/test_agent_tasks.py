@@ -187,6 +187,50 @@ def test_backup_zip_is_atomic_hashed_and_rejects_traversal(tmp_path):
     asyncio.run(scenario())
 
 
+def test_task_file_operations_reject_detected_symbolic_links(tmp_path, monkeypatch):
+    log_root = tmp_path / "logs"
+    source_root = tmp_path / "source"
+    linked_source = source_root / "linked"
+    log_root.mkdir()
+    linked_source.mkdir(parents=True)
+    linked_log = log_root / "linked.log"
+    linked_log.write_text("must not be touched", encoding="utf-8")
+    old_time = time.time() - 10 * 86400
+    os.utime(linked_log, (old_time, old_time))
+    profiles = tmp_path / "task_profiles.json"
+    _write_profiles(profiles, log_root=log_root, backup_root=source_root)
+    store = TaskProfileStore(profiles)
+    config = AgentConfig(data_dir=tmp_path, task_backup_min_free_bytes=0)
+    messages: list[tuple[str, str, dict]] = []
+
+    async def scenario():
+        async def sender(message_type: str, request_id: str, payload: dict):
+            messages.append((message_type, request_id, payload))
+
+        runner = AgentTaskRunner(config, store, sender)
+        monkeypatch.setattr(
+            "agent.task_runner._is_link",
+            lambda path: path.name in {"linked", "linked.log"},
+        )
+        preview = await _run_task(runner, messages, "clean_logs", {
+            "profile": "application",
+            "older_than_days": 7,
+            "dry_run": True,
+        })
+        assert preview["status"] == "completed"
+        assert preview["result"]["candidate_count"] == 0
+        assert linked_log.exists()
+
+        backup = await _run_task(runner, messages, "backup_files", {
+            "profile": "application",
+            "source": "linked",
+        })
+        assert backup["status"] == "failed"
+        assert "symbolic links" in backup["error"]
+
+    asyncio.run(scenario())
+
+
 def test_backup_capacity_refuses_new_archive_without_deleting_unexpired(tmp_path):
     source_root = tmp_path / "source"
     source_root.mkdir()

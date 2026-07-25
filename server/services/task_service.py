@@ -128,6 +128,34 @@ class TaskService:
     def __init__(self) -> None:
         self._subtask_locks: dict[str, asyncio.Lock] = {}
         self._task_locks: dict[str, asyncio.Lock] = {}
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def schedule_dispatch(
+        self, task_id: str, target_node_ids: list[str] | None = None,
+    ) -> None:
+        task = asyncio.create_task(self.dispatch_task(task_id, target_node_ids))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._dispatch_finished)
+
+    def _dispatch_finished(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Task dispatch failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def shutdown(self) -> None:
+        tasks = list(self._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._background_tasks.clear()
+        await self.recover_after_restart()
 
     async def recover_after_restart(self) -> None:
         now = utcnow()

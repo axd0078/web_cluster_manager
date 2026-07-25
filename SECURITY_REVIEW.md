@@ -183,7 +183,7 @@
 
 ## 验证基线
 
-- `pytest -q`：41 passed，1 skipped；
+- `pytest -q`：42 passed，1 skipped；
 - `npm test`：2 个前端测试文件、5 个组件/store 测试通过；
 - `npm run build`：通过，存在大分块警告；
 - `npm audit`：0 个已知依赖漏洞；
