@@ -5,6 +5,11 @@ import json
 import re
 import shutil
 
+from process_output import (
+    ProcessExecutionTimeout,
+    ProcessOutputLimitError,
+    communicate_bounded,
+)
 
 _CONTAINER_ID = re.compile(r"^[0-9a-fA-F]{12,64}$")
 
@@ -18,7 +23,9 @@ class DockerRuntime:
         # and tests even when a Docker CLI happens to be installed.
         self.executable = (shutil.which("docker") or "") if executable is None else executable
 
-    async def _run(self, *args: str, timeout: float = 15) -> tuple[int, str, str]:
+    async def _run(
+        self, *args: str, timeout: float = 15, max_output_bytes: int = 2 * 1024 * 1024,
+    ) -> tuple[int, str, str]:
         if not self.executable:
             return 127, "", "docker CLI not found"
         process = await asyncio.create_subprocess_exec(
@@ -27,11 +34,13 @@ class DockerRuntime:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            stdout, stderr = await communicate_bounded(
+                process, timeout=timeout, max_output_bytes=max_output_bytes,
+            )
+        except ProcessExecutionTimeout:
             return 124, "", "docker command timed out"
+        except ProcessOutputLimitError:
+            return 125, "", "docker command output exceeded byte limit"
         return (
             process.returncode or 0,
             stdout.decode("utf-8", errors="replace"),
@@ -111,7 +120,9 @@ class DockerRuntime:
         self._validate_id(runtime_id)
         if action not in self.ACTIONS:
             raise ValueError("unsupported Docker action")
-        code, stdout, stderr = await self._run(action, runtime_id, timeout=30)
+        code, stdout, stderr = await self._run(
+            action, runtime_id, timeout=30, max_output_bytes=64 * 1024,
+        )
         return {
             "success": code == 0,
             "output": stdout.strip()[-10_000:],
@@ -121,6 +132,9 @@ class DockerRuntime:
     async def logs(self, runtime_id: str, tail: int = 200) -> dict:
         self._validate_id(runtime_id)
         tail = max(1, min(int(tail), 1000))
-        code, stdout, stderr = await self._run("logs", "--tail", str(tail), runtime_id, timeout=20)
+        code, stdout, stderr = await self._run(
+            "logs", "--tail", str(tail), runtime_id,
+            timeout=20, max_output_bytes=220_000,
+        )
         combined = (stdout + stderr)[-200_000:]
         return {"success": code == 0, "logs": combined, "error": "" if code == 0 else stderr[-10_000:]}

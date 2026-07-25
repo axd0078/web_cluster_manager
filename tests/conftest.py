@@ -16,7 +16,9 @@ os.environ["WCM_BOOTSTRAP_ADMIN_PASSWORD"] = "test-bootstrap-password"
 os.environ["WCM_DEBUG"] = "false"
 os.environ["WCM_TRUSTED_HOSTS"] = '["localhost","127.0.0.1","testserver"]'
 SERVER_ROOT = Path(__file__).parents[1] / "server"
+AGENT_ROOT = Path(__file__).parents[1] / "agent"
 sys.path.insert(0, str(SERVER_ROOT))
+sys.path.append(str(AGENT_ROOT))
 
 
 @pytest.fixture

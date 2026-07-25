@@ -37,6 +37,21 @@ class AgentConfig:
     max_transfer_bytes: int = field(
         default_factory=lambda: int(os.getenv("WCM_MAX_TRANSFER_BYTES", str(100 * 1024 * 1024)))
     )
+    max_transfer_total_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_MAX_TRANSFER_TOTAL_BYTES", str(1024 * 1024 * 1024))
+        )
+    )
+    min_transfer_free_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_MIN_TRANSFER_FREE_BYTES", str(256 * 1024 * 1024))
+        )
+    )
+    transfer_partial_ttl_seconds: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_TRANSFER_PARTIAL_TTL_SECONDS", str(24 * 60 * 60))
+        )
+    )
     file_chunk_bytes: int = field(
         default_factory=lambda: int(os.getenv("WCM_FILE_CHUNK_BYTES", str(512 * 1024)))
     )

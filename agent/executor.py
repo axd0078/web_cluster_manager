@@ -3,6 +3,12 @@ from __future__ import annotations
 import asyncio
 import platform
 
+from process_output import (
+    ProcessExecutionTimeout,
+    ProcessOutputLimitError,
+    communicate_bounded,
+)
+
 
 class CommandExecutor:
     def __init__(self, enabled: bool = False, allowlist: list[str] | None = None):
@@ -22,11 +28,20 @@ class CommandExecutor:
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=max(1, min(timeout, 300)))
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+            stdout, stderr = await communicate_bounded(
+                process,
+                timeout=max(1, min(timeout, 300)),
+                max_output_bytes=64 * 1024,
+            )
+        except ProcessExecutionTimeout:
             return {"success": False, "error": "命令执行超时", "stdout": "", "stderr": ""}
+        except ProcessOutputLimitError:
+            return {
+                "success": False,
+                "error": "命令输出超过 64 KiB 安全上限",
+                "stdout": "",
+                "stderr": "",
+            }
         encoding = "gbk" if platform.system() == "Windows" else "utf-8"
         return {
             "success": process.returncode == 0,

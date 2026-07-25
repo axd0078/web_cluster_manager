@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
 from config import settings
-from core.connection_manager import manager
+from core.connection_manager import FrontendPrincipal, manager
 from core.security import decode_token
 from core.task_engine import task_engine
 from database import async_session
@@ -24,7 +26,7 @@ def _bearer_from_websocket(ws: WebSocket) -> str | None:
     return token
 
 
-async def _authenticate_frontend(ws: WebSocket) -> User | None:
+async def _authenticate_frontend(ws: WebSocket) -> FrontendPrincipal | None:
     origin = ws.headers.get("origin")
     if origin and origin not in settings.CORS_ORIGINS:
         return None
@@ -37,7 +39,33 @@ async def _authenticate_frontend(ws: WebSocket) -> User | None:
         return None
     async with async_session() as db:
         result = await db.execute(select(User).where(User.id == payload.get("sub")))
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        if user is None or int(payload.get("ver", -1)) != user.token_version:
+            return None
+        try:
+            expires_at = float(payload["exp"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if expires_at <= time.time():
+            return None
+        return FrontendPrincipal(
+            user_id=user.id,
+            role=user.role,
+            token_version=user.token_version,
+            expires_at=expires_at,
+        )
+
+
+def _task_result_event(node_id: str, request_id: str, payload: dict) -> dict:
+    """Expose only a typed status signal; Agent-controlled identifiers are ignored."""
+    return {
+        "type": "task_result",
+        "payload": {
+            "success": payload.get("success") is True,
+            "node_id": node_id,
+            "request_id": request_id,
+        },
+    }
 
 
 @router.websocket("/ws/agent")
@@ -73,24 +101,22 @@ async def agent_ws(ws: WebSocket):
                 await manager.handle_container_inventory(node.id, payload)
             elif msg_type == "task_result":
                 await task_engine.handle_task_result(node.id, request_id, payload)
-                manager.resolve_request(request_id, payload)
-                await manager.broadcast_to_frontends({
-                    "type": "task_result",
-                    "payload": {"node_id": node.id, "request_id": request_id, "result": payload},
-                })
+                manager.resolve_request(node.id, request_id, payload)
+                await manager.broadcast_to_frontends(
+                    _task_result_event(node.id, request_id, payload),
+                    allowed_roles={"admin", "operator"},
+                )
             elif msg_type == "file_transfer_result":
                 # Chunk acknowledgements are internal request/response traffic.
                 # Only the transfer service emits sanitized aggregate progress.
-                manager.resolve_request(request_id, payload)
+                manager.resolve_request(node.id, request_id, payload)
             elif msg_type in {
                 "container_result", "container_logs_result", "browse_result",
                 "update_result", "terminal_output",
             }:
-                manager.resolve_request(request_id, payload)
-                await manager.broadcast_to_frontends({
-                    "type": msg_type,
-                    "payload": {"node_id": node.id, "request_id": request_id, **payload},
-                })
+                # These are request/response messages for privileged REST calls.
+                # Do not publish their raw contents to unrelated browser sockets.
+                manager.resolve_request(node.id, request_id, payload)
             elif msg_type == "pong":
                 continue
             else:
@@ -115,10 +141,18 @@ async def frontend_ws(ws: WebSocket):
     if user is None:
         await ws.close(code=4001, reason="Authentication required")
         return
-    await manager.frontend_connect(ws)
+    await manager.frontend_connect(ws, user)
     try:
         while True:
-            raw = await ws.receive_text()
+            remaining = user.remaining_seconds()
+            if remaining <= 0:
+                await ws.close(code=4001, reason="Session expired")
+                break
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=remaining)
+            except asyncio.TimeoutError:
+                await ws.close(code=4001, reason="Session expired")
+                break
             if raw == "ping":
                 await ws.send_text("pong")
     except WebSocketDisconnect:

@@ -5,6 +5,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import stat
+import threading
+import time
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 TRANSFER_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -50,12 +54,31 @@ class FileReceiver:
     def __init__(
         self, root: Path, max_bytes: int = 100 * 1024 * 1024,
         chunk_bytes: int = 512 * 1024,
+        max_total_bytes: int | None = None,
+        min_free_bytes: int = 64 * 1024 * 1024,
+        partial_ttl_seconds: int = 24 * 60 * 60,
     ) -> None:
         self.root = root
         self.max_bytes = max(1, int(max_bytes))
+        self.max_total_bytes = max(
+            self.max_bytes,
+            int(max_total_bytes) if max_total_bytes is not None else self.max_bytes * 10,
+        )
+        self.min_free_bytes = max(0, int(min_free_bytes))
+        self.partial_ttl_seconds = max(60, int(partial_ttl_seconds))
         self.chunk_bytes = max(64 * 1024, min(int(chunk_bytes), 1024 * 1024))
+        self._lock = threading.RLock()
 
     def init(self, payload: dict) -> dict:
+        with self._lock:
+            try:
+                self.root.mkdir(parents=True, exist_ok=True)
+                self._cleanup_stale_sessions()
+            except Exception as exc:
+                return {"success": False, "phase": "init", "error": str(exc)}
+            return self._init(payload)
+
+    def _init(self, payload: dict) -> dict:
         try:
             transfer_id = self._transfer_id(payload)
             relative = validate_relative_path(str(payload.get("dest_path") or ""))
@@ -70,7 +93,6 @@ class FileReceiver:
             if requested_chunk <= 0 or requested_chunk > self.chunk_bytes:
                 raise ValueError("invalid file chunk size")
 
-            self.root.mkdir(parents=True, exist_ok=True)
             partial_dir = self._partial_dir()
             partial_dir.mkdir(parents=True, exist_ok=True)
             destination = self._destination(relative)
@@ -106,6 +128,21 @@ class FileReceiver:
                     current = json.loads(meta_path.read_text(encoding="utf-8"))
                 except (OSError, json.JSONDecodeError):
                     current = None
+            current_part_bytes = part_path.stat().st_size if part_path.is_file() else 0
+            if current == expected:
+                received = min(current_part_bytes, size)
+                additional_disk_bytes = size - received
+                reclaimable_bytes = 0
+            else:
+                received = 0
+                additional_disk_bytes = size
+                reclaimable_bytes = current_part_bytes
+            self._ensure_capacity(
+                size,
+                exclude_transfer_id=transfer_id,
+                additional_disk_bytes=additional_disk_bytes,
+                reclaimable_bytes=reclaimable_bytes,
+            )
             if current != expected:
                 part_path.unlink(missing_ok=True)
                 meta_path.unlink(missing_ok=True)
@@ -126,6 +163,10 @@ class FileReceiver:
             return {"success": False, "phase": "init", "error": str(exc)}
 
     def chunk(self, payload: dict) -> dict:
+        with self._lock:
+            return self._chunk(payload)
+
+    def _chunk(self, payload: dict) -> dict:
         try:
             transfer_id = self._transfer_id(payload)
             part_path, meta_path = self._state_paths(transfer_id)
@@ -171,6 +212,10 @@ class FileReceiver:
             return {"success": False, "phase": "chunk", "error": str(exc)}
 
     def commit(self, payload: dict) -> dict:
+        with self._lock:
+            return self._commit(payload)
+
+    def _commit(self, payload: dict) -> dict:
         try:
             transfer_id = self._transfer_id(payload)
             part_path, meta_path = self._state_paths(transfer_id)
@@ -204,6 +249,17 @@ class FileReceiver:
         except Exception as exc:
             return {"success": False, "phase": "commit", "error": str(exc)}
 
+    def cancel(self, payload: dict) -> dict:
+        with self._lock:
+            try:
+                transfer_id = self._transfer_id(payload)
+                part_path, meta_path = self._state_paths(transfer_id)
+                part_path.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+                return {"success": True, "phase": "cancel"}
+            except Exception as exc:
+                return {"success": False, "phase": "cancel", "error": str(exc)}
+
     def _partial_dir(self) -> Path:
         root = self.root.resolve()
         path = (root / ".wcm-partials").resolve()
@@ -225,6 +281,102 @@ class FileReceiver:
         if destination == root or root not in destination.parents:
             raise ValueError("destination escapes transfer root")
         return destination
+
+    def _ensure_capacity(
+        self,
+        requested_bytes: int,
+        *,
+        exclude_transfer_id: str,
+        additional_disk_bytes: int,
+        reclaimable_bytes: int = 0,
+    ) -> None:
+        committed = self._committed_bytes()
+        reserved = self._reserved_bytes(exclude_transfer_id=exclude_transfer_id)
+        if committed + reserved + requested_bytes > self.max_total_bytes:
+            raise ValueError("agent aggregate transfer quota exceeded")
+        free = shutil.disk_usage(self.root).free + max(0, reclaimable_bytes)
+        if free - max(0, additional_disk_bytes) < self.min_free_bytes:
+            raise ValueError("insufficient free disk space for transfer")
+
+    def _committed_bytes(self) -> int:
+        root = self.root.resolve()
+        partial_dir = self._partial_dir()
+        total = 0
+        for current, directories, filenames in os.walk(root, followlinks=False):
+            current_path = Path(current).resolve()
+            directories[:] = [
+                name for name in directories
+                if (current_path / name).resolve() != partial_dir
+                and not (current_path / name).is_symlink()
+            ]
+            for filename in filenames:
+                path = current_path / filename
+                try:
+                    info = path.lstat()
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    total += info.st_size
+        return total
+
+    def _reserved_bytes(self, *, exclude_transfer_id: str) -> int:
+        partial_dir = self._partial_dir()
+        if not partial_dir.is_dir():
+            return 0
+        total = 0
+        accounted_parts: set[str] = set()
+        for meta_path in partial_dir.glob("*.json"):
+            transfer_id = meta_path.stem
+            part_path = partial_dir / f"{transfer_id}.part"
+            if transfer_id == exclude_transfer_id:
+                accounted_parts.add(part_path.name)
+                continue
+            try:
+                metadata = self._load_metadata(meta_path)
+                size = int(metadata.get("size", -1))
+            except (TypeError, ValueError):
+                size = -1
+            if 0 < size <= self.max_bytes:
+                total += size
+                accounted_parts.add(part_path.name)
+        for part_path in partial_dir.glob("*.part"):
+            if part_path.name in accounted_parts:
+                continue
+            try:
+                info = part_path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+        return total
+
+    def _cleanup_stale_sessions(self) -> None:
+        partial_dir = self._partial_dir()
+        if not partial_dir.is_dir():
+            return
+        cutoff = time.time() - self.partial_ttl_seconds
+        candidates = {
+            path.stem for path in partial_dir.glob("*.json")
+        } | {
+            path.stem for path in partial_dir.glob("*.part")
+        }
+        for transfer_id in candidates:
+            part_path, meta_path = self._state_paths(transfer_id)
+            mtimes = []
+            for path in (part_path, meta_path):
+                try:
+                    mtimes.append(path.stat().st_mtime)
+                except OSError:
+                    pass
+            if mtimes and max(mtimes) < cutoff:
+                part_path.unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+        for temporary in partial_dir.glob("*.tmp"):
+            try:
+                if temporary.stat().st_mtime < cutoff:
+                    temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @staticmethod
     def _transfer_id(payload: dict) -> str:

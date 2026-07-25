@@ -66,18 +66,21 @@ class TaskEngine:
             completed = sum(1 for s in all_subtasks if s.status == "completed")
             failed = sum(1 for s in all_subtasks if s.status == "failed")
 
-            await manager.broadcast_to_frontends({
-                "type": "task_progress",
-                "payload": {
-                    "task_id": request_id,
-                    "node_id": node_id,
-                    "status": st.status,
-                    "progress": f"{completed + failed}/{len(all_subtasks)}",
-                    "completed": completed,
-                    "failed": failed,
-                    "total": len(all_subtasks),
+            await manager.broadcast_to_frontends(
+                {
+                    "type": "task_progress",
+                    "payload": {
+                        "task_id": request_id,
+                        "node_id": node_id,
+                        "status": st.status,
+                        "progress": f"{completed + failed}/{len(all_subtasks)}",
+                        "completed": completed,
+                        "failed": failed,
+                        "total": len(all_subtasks),
+                    },
                 },
-            })
+                allowed_roles={"admin", "operator"},
+            )
 
     @staticmethod
     async def check_stale_tasks():

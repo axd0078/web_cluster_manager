@@ -7,9 +7,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from core.connection_manager import manager
 from core.security import (
-    create_access_token, create_refresh_token, decode_token, generate_csrf_token,
-    hash_password, verify_password,
+    DUMMY_PASSWORD_HASH, create_access_token, create_refresh_token, decode_token,
+    generate_csrf_token, hash_password, verify_password,
 )
 from database import get_db
 from middleware.auth import get_current_user, require_role
@@ -72,7 +73,9 @@ async def login(
     _check_login_rate_limit(client)
     result = await db.execute(select(User).where(User.username == body.username))
     user = result.scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password):
+    password_hash = user.password if user is not None else DUMMY_PASSWORD_HASH
+    password_valid = verify_password(body.password, password_hash)
+    if user is None or not password_valid:
         _failed_logins.setdefault(client, []).append(time.monotonic())
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
     _failed_logins.pop(client, None)
@@ -120,6 +123,8 @@ async def change_password(
     user.token_version += 1
     db.add(user)
     db.add(AuditLog(user_id=user.id, action="auth.password.change", resource=user.id))
+    await db.commit()
+    await manager.disconnect_user(user.id, reason="Password changed")
     _set_auth_cookies(response, user)
 
 
@@ -129,10 +134,12 @@ async def logout(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    _clear_auth_cookies(response)
     user.token_version += 1
     db.add(user)
     db.add(AuditLog(user_id=user.id, action="auth.logout", resource=user.id))
+    await db.commit()
+    await manager.disconnect_user(user.id, reason="Logged out")
+    _clear_auth_cookies(response)
 
 
 @router.post("/users", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,13 +18,22 @@ router = APIRouter(prefix="/api/v2/monitor", tags=["monitor"])
 @router.websocket("/ws")
 async def monitor_ws(ws: WebSocket):
     """Dedicated WebSocket for real-time monitor data (frontend)."""
-    if await _authenticate_frontend(ws) is None:
+    principal = await _authenticate_frontend(ws)
+    if principal is None:
         await ws.close(code=4001, reason="Authentication required")
         return
-    await manager.frontend_connect(ws)
+    await manager.frontend_connect(ws, principal)
     try:
         while True:
-            await ws.receive_text()
+            remaining = principal.remaining_seconds()
+            if remaining <= 0:
+                await ws.close(code=4001, reason="Session expired")
+                break
+            try:
+                await asyncio.wait_for(ws.receive_text(), timeout=remaining)
+            except asyncio.TimeoutError:
+                await ws.close(code=4001, reason="Session expired")
+                break
     except WebSocketDisconnect:
         pass
     finally:

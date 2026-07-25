@@ -26,15 +26,24 @@ TASK_TEMPLATES = [
 ]
 
 
+def _owned_task_query(task_id: str, user: User):
+    query = select(Task).where(Task.id == task_id)
+    if user.role != "admin":
+        query = query.where(Task.created_by == user.id)
+    return query
+
+
 @router.get("/", response_model=list[TaskResponse])
 async def list_tasks(
     status: str | None = Query(None),
     task_type: str | None = Query(None),
     limit: int = Query(50, le=200),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     q = select(Task).order_by(Task.created.desc())
+    if user.role != "admin":
+        q = q.where(Task.created_by == user.id)
     if status:
         q = q.where(Task.status == status)
     if task_type:
@@ -69,7 +78,7 @@ async def create_task(
         raise HTTPException(status_code=403, detail="远程命令功能默认关闭")
     task = Task(
         type=body.type, title=body.title,
-        params=json.dumps(body.params), created_by=user.username,
+        params=json.dumps(body.params), created_by=user.id,
     )
     db.add(task)
     await db.flush()
@@ -101,9 +110,9 @@ async def create_task(
 async def get_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Task).where(Task.id == task_id))
+    result = await db.execute(_owned_task_query(task_id, user))
     task = result.scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -135,9 +144,9 @@ async def get_task(
 async def cancel_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    user: User = Depends(require_role("admin", "operator")),
 ):
-    result = await db.execute(select(Task).where(Task.id == task_id))
+    result = await db.execute(_owned_task_query(task_id, user))
     task = result.scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -153,9 +162,9 @@ async def cancel_task(
 async def retry_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    user: User = Depends(require_role("admin", "operator")),
 ):
-    result = await db.execute(select(Task).where(Task.id == task_id))
+    result = await db.execute(_owned_task_query(task_id, user))
     task = result.scalar_one_or_none()
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")

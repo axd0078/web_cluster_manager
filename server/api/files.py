@@ -435,7 +435,7 @@ async def list_transfers(
     user: User = Depends(get_current_user),
 ):
     query = select(FileTransfer).order_by(FileTransfer.created.desc()).limit(limit)
-    if user.role == "operator":
+    if user.role != "admin":
         query = query.where(FileTransfer.created_by == user.id)
     result = await db.execute(query)
     transfers = result.scalars().all()
@@ -462,7 +462,7 @@ async def get_transfer(
     user: User = Depends(get_current_user),
 ):
     transfer = await db.get(FileTransfer, transfer_id)
-    if transfer is None or (user.role == "operator" and transfer.created_by != user.id):
+    if transfer is None or (user.role != "admin" and transfer.created_by != user.id):
         raise HTTPException(status_code=404, detail="传输任务不存在")
     result = await db.execute(
         select(FileTransferTarget).where(

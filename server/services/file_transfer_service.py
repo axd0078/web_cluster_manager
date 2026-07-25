@@ -154,10 +154,13 @@ class FileTransferService:
                 transfer.finished = None
                 await db.commit()
 
-            await manager.broadcast_to_frontends({
-                "type": "file_transfer_progress",
-                "payload": {"transfer_id": transfer_id, "status": "running"},
-            })
+            await manager.broadcast_to_frontends(
+                {
+                    "type": "file_transfer_progress",
+                    "payload": {"transfer_id": transfer_id, "status": "running"},
+                },
+                allowed_roles={"admin", "operator"},
+            )
             await asyncio.gather(*[
                 self._run_target(transfer_id, target_id, source_path)
                 for target_id in target_ids
@@ -354,10 +357,13 @@ class FileTransferService:
                 detail=json.dumps({"status": status}, ensure_ascii=False),
             ))
             await db.commit()
-        await manager.broadcast_to_frontends({
-            "type": "file_transfer_progress",
-            "payload": {"transfer_id": transfer_id, "status": status},
-        })
+        await manager.broadcast_to_frontends(
+            {
+                "type": "file_transfer_progress",
+                "payload": {"transfer_id": transfer_id, "status": status},
+            },
+            allowed_roles={"admin", "operator"},
+        )
 
     async def _broadcast_target(self, transfer_id: str, target_id: str) -> None:
         async with async_session() as db:
@@ -372,9 +378,10 @@ class FileTransferService:
                 "bytes_sent": target.bytes_sent,
                 "error": target.error,
             }
-        await manager.broadcast_to_frontends({
-            "type": "file_transfer_progress", "payload": payload,
-        })
+        await manager.broadcast_to_frontends(
+            {"type": "file_transfer_progress", "payload": payload},
+            allowed_roles={"admin", "operator"},
+        )
 
 
 file_transfer_service = FileTransferService()

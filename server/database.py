@@ -12,7 +12,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from config import settings
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -115,6 +115,25 @@ async def init_db():
             ))
             await conn.execute(
                 text("INSERT INTO schema_migrations(version, applied_at) VALUES (4, :now)"),
+                {"now": datetime.now(timezone.utc)},
+            )
+        result = await conn.execute(text("SELECT version FROM schema_migrations WHERE version = 5"))
+        if result.scalar_one_or_none() is None:
+            # Task ownership used to store the mutable username. Convert every
+            # resolvable owner to the stable user id before enforcing object
+            # authorization in the API.
+            await conn.execute(text(
+                "UPDATE tasks SET created_by = ("
+                "SELECT users.id FROM users WHERE users.username = tasks.created_by"
+                ") WHERE created_by IS NOT NULL AND EXISTS ("
+                "SELECT 1 FROM users WHERE users.username = tasks.created_by"
+                ")"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_tasks_created_by ON tasks(created_by)"
+            ))
+            await conn.execute(
+                text("INSERT INTO schema_migrations(version, applied_at) VALUES (5, :now)"),
                 {"now": datetime.now(timezone.utc)},
             )
 

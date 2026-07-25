@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import asyncio
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,3 +38,16 @@ def test_docker_unavailable_degrades_to_empty_inventory():
 def test_sensitive_docker_labels_are_not_reported():
     labels = DockerRuntime._labels("app=demo,api_token=hidden,db_password=hidden,team=ops")
     assert labels == {"app": "demo", "team": "ops"}
+
+
+def test_docker_process_output_is_bounded_before_decode():
+    runtime = DockerRuntime(sys.executable)
+    code, stdout, stderr = asyncio.run(runtime._run(
+        "-c",
+        "import sys; sys.stdout.buffer.write(b'x' * 200000)",
+        timeout=10,
+        max_output_bytes=1024,
+    ))
+    assert code == 125
+    assert stdout == ""
+    assert "exceeded byte limit" in stderr

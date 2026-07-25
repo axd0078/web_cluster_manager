@@ -33,12 +33,13 @@ async def terminal_ws(
             await ws.close(code=4001, reason="Unknown node")
             return
 
-    await ws.accept()
+    await manager.authenticated_connect(ws, user)
 
     # Check agent is online
     if node_id not in manager.get_connected_agents():
         await ws.send_json({"type": "error", "message": "节点不在线"})
         await ws.close()
+        await manager.authenticated_disconnect(ws)
         return
 
     # Create a pending response queue
@@ -54,7 +55,15 @@ async def terminal_ws(
 
     try:
         while True:
-            raw = await ws.receive_text()
+            remaining = user.remaining_seconds()
+            if remaining <= 0:
+                await ws.close(code=4001, reason="Session expired")
+                break
+            try:
+                raw = await asyncio.wait_for(ws.receive_text(), timeout=remaining)
+            except asyncio.TimeoutError:
+                await ws.close(code=4001, reason="Session expired")
+                break
             msg = json.loads(raw)
 
             if msg.get("type") == "input":
@@ -80,6 +89,7 @@ async def terminal_ws(
     except WebSocketDisconnect:
         pass
     finally:
+        await manager.authenticated_disconnect(ws)
         # Clean up pending futures
         for fut in pending.values():
             if not fut.done():

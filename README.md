@@ -98,6 +98,10 @@ cd web-ui && npm run dev
 Agent 在 Docker 宿主机原生运行，通过本机 Docker CLI 发现容器并上报指标。
 管理员可以查看日志及执行启动、停止、重启；系统不开放容器内 `exec`，服务端也不会挂载 Docker Socket。
 
+Agent 文件接收默认限制单文件 100 MiB、聚合 1 GiB，并保留至少 256 MiB
+空闲空间；可通过 `WCM_MAX_TRANSFER_BYTES`、
+`WCM_MAX_TRANSFER_TOTAL_BYTES` 和 `WCM_MIN_TRANSFER_FREE_BYTES` 调整。
+
 服务端生产部署可使用根目录 `docker-compose.yml`，证书与 Secret 的准备方式见 `deploy/README.md`。
 
 远程命令与终端默认关闭。确需启用时，服务端和对应 Agent 都必须设置

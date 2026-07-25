@@ -11,6 +11,9 @@ from passlib.context import CryptContext
 from config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Used only to equalize the work factor for unknown usernames. It is generated
+# once at startup and is never accepted as an application credential.
+DUMMY_PASSWORD_HASH = pwd_context.hash(secrets.token_urlsafe(32))
 
 
 def hash_password(password: str) -> str:

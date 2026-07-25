@@ -35,6 +35,9 @@ class Agent:
             config.transfer_root,
             max_bytes=config.max_transfer_bytes,
             chunk_bytes=config.file_chunk_bytes,
+            max_total_bytes=config.max_transfer_total_bytes,
+            min_free_bytes=config.min_transfer_free_bytes,
+            partial_ttl_seconds=config.transfer_partial_ttl_seconds,
         )
         self._last_docker_report = 0.0
         self.conn.on_message(self._handle_message)
@@ -95,6 +98,10 @@ class Agent:
 
         elif msg_type == "file_transfer_commit":
             result = self.file_receiver.commit(payload)
+            await self._send_result("file_transfer_result", request_id, result)
+
+        elif msg_type == "file_transfer_cancel":
+            result = self.file_receiver.cancel(payload)
             await self._send_result("file_transfer_result", request_id, result)
 
         elif msg_type == "update":

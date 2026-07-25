@@ -206,3 +206,33 @@ def test_agent_rejects_symlink_escape_when_supported(tmp_path):
     })
     assert not result["success"]
     assert "escapes transfer root" in result["error"]
+
+
+def test_agent_enforces_aggregate_quota_and_releases_cancelled_reservation(tmp_path):
+    root = tmp_path / "quota-root"
+    receiver = FileReceiver(
+        root,
+        max_bytes=256 * 1024,
+        max_total_bytes=384 * 1024,
+        min_free_bytes=0,
+    )
+    first = {
+        "transfer_id": "quota-first",
+        "dest_path": "first.bin",
+        "size": 256 * 1024,
+        "sha256": hashlib.sha256(b"a").hexdigest(),
+        "chunk_size": 64 * 1024,
+        "overwrite": False,
+    }
+    second = {
+        **first,
+        "transfer_id": "quota-second",
+        "dest_path": "second.bin",
+    }
+    assert receiver.init(first)["success"] is True
+    rejected = receiver.init(second)
+    assert rejected["success"] is False
+    assert "aggregate transfer quota" in rejected["error"]
+
+    assert receiver.cancel({"transfer_id": "quota-first"})["success"] is True
+    assert receiver.init(second)["success"] is True
