@@ -93,6 +93,11 @@ watch(lastMessage, message => {
   }
 })
 
+watch(
+  () => userStore.user?.permissions.join(','),
+  () => taskStore.fetchTemplates(),
+)
+
 onMounted(async () => {
   const [groupResponse] = await Promise.all([
     nodesApi.listGroups(),

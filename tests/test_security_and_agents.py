@@ -5,19 +5,26 @@ import time
 from starlette.websockets import WebSocketDisconnect
 
 
-def login(client):
+def login(client, elevate: bool = True):
     response = client.post("/api/v2/auth/login", json={
         "username": "admin", "password": "test-bootstrap-password",
     })
     assert response.status_code == 200
-    return {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    csrf = {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    if elevate:
+        assert client.post(
+            "/api/v2/auth/step-up",
+            headers=csrf,
+            json={"password": "test-bootstrap-password"},
+        ).status_code == 200
+    return csrf
 
 
 def test_public_registration_removed_and_csrf_enforced(client):
     assert client.post("/api/v2/auth/register", json={
         "username": "attacker", "password": "attacker-password", "role": "admin",
     }).status_code in {404, 405}
-    login(client)
+    login(client, elevate=False)
     assert client.post("/api/v2/agent-enrollment-tokens", json={}).status_code == 403
 
 

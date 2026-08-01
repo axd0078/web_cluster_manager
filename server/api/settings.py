@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
 from config import settings
-from middleware.auth import require_role
+from middleware.auth import require_permission
 
 router = APIRouter(prefix="/api/v2/settings", tags=["settings"])
 
@@ -25,7 +25,7 @@ class SystemSettings(BaseModel):
 
 
 @router.get("/", response_model=SystemSettings)
-async def get_settings(_user=Depends(require_role("admin"))):
+async def get_settings(_user=Depends(require_permission("settings.read"))):
     return SystemSettings()
 
 
@@ -39,7 +39,7 @@ class SettingsUpdate(BaseModel):
 @router.put("/")
 async def update_settings(
     body: SettingsUpdate,
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("settings.write")),
 ):
     if body.debug is not None:
         settings.DEBUG = body.debug

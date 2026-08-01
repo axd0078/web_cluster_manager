@@ -29,8 +29,50 @@ class AgentConfig:
     enable_remote_commands: bool = field(
         default_factory=lambda: os.getenv("WCM_ENABLE_REMOTE_COMMANDS", "false").lower() == "true"
     )
+    enable_low_terminal: bool = field(
+        default_factory=lambda: os.getenv("WCM_ENABLE_LOW_TERMINAL", "false").lower() == "true"
+    )
+    terminal_max_sessions: int = field(
+        default_factory=lambda: int(os.getenv("WCM_TERMINAL_MAX_SESSIONS", "4"))
+    )
+    enable_agent_updates: bool = field(
+        default_factory=lambda: os.getenv("WCM_ENABLE_AGENT_UPDATES", "false").lower() == "true"
+    )
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("WCM_AGENT_DATA_DIR", "agent_data")))
     transfer_root: Path = field(default_factory=lambda: Path(os.getenv("WCM_TRANSFER_ROOT", "agent_data/transfers")))
+    update_spool_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("WCM_UPDATE_SPOOL_DIR", "agent_data/update-spool")
+        )
+    )
+    update_trusted_keys_dir: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("WCM_UPDATE_TRUSTED_KEYS_DIR", "agent_data/trusted_update_keys")
+        )
+    )
+    update_active_pointer: Path = field(
+        default_factory=lambda: Path(
+            os.getenv("WCM_UPDATE_ACTIVE_POINTER", "agent_data/active.json")
+        )
+    )
+    max_update_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_MAX_UPDATE_BYTES", str(100 * 1024 * 1024))
+        )
+    )
+    max_update_expanded_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_MAX_UPDATE_EXPANDED_BYTES", str(500 * 1024 * 1024))
+        )
+    )
+    max_update_entries: int = field(
+        default_factory=lambda: int(os.getenv("WCM_MAX_UPDATE_ENTRIES", "10000"))
+    )
+    min_update_free_bytes: int = field(
+        default_factory=lambda: int(
+            os.getenv("WCM_MIN_UPDATE_FREE_BYTES", str(256 * 1024 * 1024))
+        )
+    )
     max_transfer_bytes: int = field(
         default_factory=lambda: int(os.getenv("WCM_MAX_TRANSFER_BYTES", str(100 * 1024 * 1024)))
     )
@@ -73,8 +115,14 @@ class AgentConfig:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = asdict(self)
         data.pop("enrollment_token", None)
-        data["data_dir"] = str(self.data_dir)
-        data["transfer_root"] = str(self.transfer_root)
+        for key in (
+            "data_dir",
+            "transfer_root",
+            "update_spool_dir",
+            "update_trusted_keys_dir",
+            "update_active_pointer",
+        ):
+            data[key] = str(data[key])
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         try:
             path.chmod(0o600)
@@ -104,6 +152,15 @@ class AgentConfig:
             return cls()
         data["data_dir"] = Path(data.get("data_dir", "agent_data"))
         data["transfer_root"] = Path(data.get("transfer_root", "agent_data/transfers"))
+        data["update_spool_dir"] = Path(
+            data.get("update_spool_dir", "agent_data/update-spool")
+        )
+        data["update_trusted_keys_dir"] = Path(
+            data.get("update_trusted_keys_dir", "agent_data/trusted_update_keys")
+        )
+        data["update_active_pointer"] = Path(
+            data.get("update_active_pointer", "agent_data/active.json")
+        )
         allowed = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
         loaded = cls(**allowed)
         loaded.enrollment_token = os.getenv("WCM_ENROLLMENT_TOKEN", "")

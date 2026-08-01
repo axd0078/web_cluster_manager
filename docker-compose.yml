@@ -13,12 +13,24 @@ services:
       WCM_BOOTSTRAP_ADMIN_USERNAME: ${WCM_BOOTSTRAP_ADMIN_USERNAME:-admin}
       WCM_CORS_ORIGINS: '["https://${WCM_PUBLIC_HOST}"]'
       WCM_TRUSTED_HOSTS: '["${WCM_PUBLIC_HOST}","app"]'
+      WCM_MAX_UPLOAD_BYTES: "${WCM_MAX_UPLOAD_BYTES:-104857600}"
+      WCM_UPDATE_TRUSTED_KEYS_DIR: /run/secrets/update_keys
+      WCM_UPDATE_CHUNK_BYTES: "${WCM_UPDATE_CHUNK_BYTES:-524288}"
+      WCM_UPDATE_TRANSFER_CONCURRENCY: "${WCM_UPDATE_TRANSFER_CONCURRENCY:-4}"
+      WCM_UPDATE_TRANSFER_TIMEOUT_SECONDS: "${WCM_UPDATE_TRANSFER_TIMEOUT_SECONDS:-30}"
+      WCM_UPDATE_HEALTH_TIMEOUT_SECONDS: "${WCM_UPDATE_HEALTH_TIMEOUT_SECONDS:-120}"
+      WCM_UPDATE_MAX_ENTRIES: "${WCM_UPDATE_MAX_ENTRIES:-10000}"
+      WCM_UPDATE_MAX_EXPANDED_BYTES: "${WCM_UPDATE_MAX_EXPANDED_BYTES:-524288000}"
+      WCM_UPDATE_MAX_TARGETS: "${WCM_UPDATE_MAX_TARGETS:-32}"
+      WCM_ENABLE_LOW_TERMINAL: "${WCM_ENABLE_LOW_TERMINAL:-false}"
+      WCM_ENABLE_PRIVILEGED_TERMINAL: "${WCM_ENABLE_PRIVILEGED_TERMINAL:-false}"
     expose:
       - "8000"
     volumes:
       - wcm-data:/app/server/data
       - wcm-updates:/app/server/updates
       - wcm-logs:/app/server/logs
+      - ./secrets/update_keys:/run/secrets/update_keys:ro
     secrets:
       - jwt_secret
       - bootstrap_admin_password

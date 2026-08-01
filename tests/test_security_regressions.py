@@ -17,7 +17,14 @@ def _login(client, username: str, password: str) -> dict[str, str]:
         "password": password,
     })
     assert response.status_code == 200, response.text
-    return {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    csrf = {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    if username == "admin":
+        assert client.post(
+            "/api/v2/auth/step-up",
+            headers=csrf,
+            json={"password": password},
+        ).status_code == 200
+    return csrf
 
 
 def _create_user(client, csrf: dict[str, str], role: str) -> tuple[str, str, str]:
@@ -104,7 +111,7 @@ def test_frontend_broadcasts_are_role_scoped_and_agent_replies_are_node_bound():
         )
         await connection_manager.frontend_connect(
             viewer,
-            FrontendPrincipal("viewer-id", "viewer", 0, expires),
+            FrontendPrincipal("viewer-id", "user", 0, expires),
         )
         event = {"type": "privileged", "payload": {"secret": "admin-only"}}
         await connection_manager.broadcast_to_frontends(
@@ -150,8 +157,8 @@ def test_agent_payload_cannot_override_trusted_event_identifiers():
 
 def test_operator_cannot_read_cancel_or_retry_another_operators_task(client):
     admin_csrf = _login(client, "admin", "test-bootstrap-password")
-    owner_id, owner_name, owner_password = _create_user(client, admin_csrf, "operator")
-    _, other_name, other_password = _create_user(client, admin_csrf, "operator")
+    owner_id, owner_name, owner_password = _create_user(client, admin_csrf, "user")
+    _, other_name, other_password = _create_user(client, admin_csrf, "user")
     enrollment = client.post(
         "/api/v2/agent-enrollment-tokens",
         headers=admin_csrf,
@@ -232,7 +239,7 @@ def test_viewer_cannot_read_another_users_file_transfer_history(client):
             ),
         )
 
-    _, viewer_name, viewer_password = _create_user(client, admin_csrf, "viewer")
+    _, viewer_name, viewer_password = _create_user(client, admin_csrf, "user")
     _login(client, viewer_name, viewer_password)
     transfers = client.get("/api/v2/files/transfers")
     assert transfers.status_code == 200

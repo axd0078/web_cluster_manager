@@ -151,6 +151,14 @@ def main() -> int:
         def headers() -> dict[str, str]:
             return {"X-CSRF-Token": session.cookies.get("wcm_csrf", "")}
 
+        elevated = session.post(
+            f"{api}/auth/step-up",
+            headers=headers(),
+            json={"password": PASSWORD},
+            timeout=5,
+        )
+        elevated.raise_for_status()
+
         agent_data = [runtime / "agent-one", runtime / "agent-two"]
         local_roots = [runtime / "root-one", runtime / "root-two"]
         node_ids: list[str] = []

@@ -56,7 +56,7 @@ def test_profiles_hot_reload_and_fail_closed(tmp_path):
     assert store.capabilities()["task_profiles"]["clean_logs"] == ["application"]
 
     time.sleep(0.01)
-    profiles.write_text('{"version": 2}', encoding="utf-8")
+    profiles.write_text('{"version": 3}', encoding="utf-8")
     assert store.reload_if_changed() is True
     assert store.last_error
     assert store.capabilities()["task_profiles"]["clean_logs"] == []

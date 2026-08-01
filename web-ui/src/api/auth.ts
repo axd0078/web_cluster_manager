@@ -8,6 +8,11 @@ export const authApi = {
   logout: () => api.post('/auth/logout'),
   changePassword: (currentPassword: string, newPassword: string) =>
     api.post('/auth/password', { current_password: currentPassword, new_password: newPassword }),
-  createUser: (username: string, password: string, role: string = 'viewer') =>
+  stepUp: (password: string) => api.post('/auth/step-up', { password }),
+  revokeStepUp: () => api.delete('/auth/step-up'),
+  createUser: (username: string, password: string, role: string = 'user') =>
     api.post('/auth/users', { username, password, role }),
+  listUsers: () => api.get('/auth/users'),
+  updateUser: (id: string, data: { role?: 'admin' | 'user'; disabled?: boolean }) =>
+    api.patch(`/auth/users/${id}`, data),
 }

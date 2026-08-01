@@ -181,7 +181,7 @@ class FileTransferService:
                     "type": "file_transfer_progress",
                     "payload": {"transfer_id": transfer_id, "status": "running"},
                 },
-                allowed_roles={"admin", "operator"},
+                allowed_roles={"admin", "user"},
             )
             await asyncio.gather(*[
                 self._run_target(transfer_id, target_id, source_path)
@@ -384,7 +384,7 @@ class FileTransferService:
                 "type": "file_transfer_progress",
                 "payload": {"transfer_id": transfer_id, "status": status},
             },
-            allowed_roles={"admin", "operator"},
+                allowed_roles={"admin", "user"},
         )
 
     async def _broadcast_target(self, transfer_id: str, target_id: str) -> None:
@@ -402,7 +402,7 @@ class FileTransferService:
             }
         await manager.broadcast_to_frontends(
             {"type": "file_transfer_progress", "payload": payload},
-            allowed_roles={"admin", "operator"},
+                allowed_roles={"admin", "user"},
         )
 
 

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.connection_manager import manager
 from api.ws import _authenticate_frontend
 from database import get_db
-from middleware.auth import get_current_user
+from middleware.auth import require_permission
 from models.node import Alert, Metric, Node
 
 router = APIRouter(prefix="/api/v2/monitor", tags=["monitor"])
@@ -43,7 +43,7 @@ async def monitor_ws(ws: WebSocket):
 @router.get("/current")
 async def current_snapshot(
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_permission("cluster.read")),
 ):
     """Return latest metric for every online node."""
     nodes_result = await db.execute(select(Node).where(Node.status == "online"))
@@ -75,7 +75,7 @@ async def recent_alerts(
     limit: int = Query(50, le=200),
     resolved: bool | None = None,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_permission("cluster.read")),
 ):
     q = select(Alert).order_by(Alert.created.desc())
     if resolved is not None:

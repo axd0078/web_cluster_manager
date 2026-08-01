@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "log_profiles": {
     "application": {
       "root": "/var/log/my-application",
@@ -26,6 +26,24 @@
         "/usr/bin/uptime"
       ],
       "timeout": 15
+    }
+  },
+  "terminal_profiles": {
+    "system-summary": {
+      "argv": [
+        "/usr/bin/uname",
+        "-a"
+      ],
+      "timeout": 15,
+      "output_limit": 65536
+    },
+    "disk-usage": {
+      "argv": [
+        "/usr/bin/df",
+        "-h"
+      ],
+      "timeout": 30,
+      "output_limit": 262144
     }
   }
 }

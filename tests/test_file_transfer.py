@@ -14,7 +14,13 @@ def login(client) -> dict[str, str]:
         "username": "admin", "password": "test-bootstrap-password",
     })
     assert response.status_code == 200
-    return {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    csrf = {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    assert client.post(
+        "/api/v2/auth/step-up",
+        headers=csrf,
+        json={"password": "test-bootstrap-password"},
+    ).status_code == 200
+    return csrf
 
 
 def test_chunked_upload_resume_hash_and_limits(client):

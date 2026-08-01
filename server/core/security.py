@@ -24,22 +24,68 @@ def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
 
 
-def create_access_token(subject: str, role: str, token_version: int = 0) -> str:
+def generate_session_id() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def create_access_token(
+    subject: str,
+    role: str,
+    token_version: int = 0,
+    sid: str | None = None,
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(
-        {"sub": subject, "role": role, "ver": token_version, "exp": expire, "type": "access"},
+        {
+            "sub": subject,
+            "role": role,
+            "ver": token_version,
+            "sid": sid or generate_session_id(),
+            "exp": expire,
+            "type": "access",
+        },
         settings.JWT_SECRET,
         algorithm=settings.JWT_ALGORITHM,
     )
 
 
-def create_refresh_token(subject: str, token_version: int = 0) -> str:
+def create_refresh_token(
+    subject: str,
+    token_version: int = 0,
+    sid: str | None = None,
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
     return jwt.encode(
-        {"sub": subject, "ver": token_version, "exp": expire, "type": "refresh"},
+        {
+            "sub": subject,
+            "ver": token_version,
+            "sid": sid or generate_session_id(),
+            "exp": expire,
+            "type": "refresh",
+        },
         settings.JWT_SECRET,
         algorithm=settings.JWT_ALGORITHM,
     )
+
+
+def create_step_up_token(
+    subject: str,
+    sid: str,
+    token_version: int,
+) -> tuple[str, datetime]:
+    expire = datetime.now(timezone.utc) + timedelta(minutes=settings.STEP_UP_EXPIRE_MINUTES)
+    token = jwt.encode(
+        {
+            "sub": subject,
+            "sid": sid,
+            "ver": token_version,
+            "exp": expire,
+            "type": "step_up",
+        },
+        settings.JWT_SECRET,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+    return token, expire
 
 
 def decode_token(token: str, expected_type: str | None = None) -> dict:

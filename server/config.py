@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     APP_NAME: str = "Web Cluster Manager"
-    VERSION: str = "3.1.0"
+    VERSION: str = "4.0.0"
     DEBUG: bool = True
     ENVIRONMENT: str = "development"
 
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     ACCESS_COOKIE_NAME: str = "wcm_access"
     REFRESH_COOKIE_NAME: str = "wcm_refresh"
     CSRF_COOKIE_NAME: str = "wcm_csrf"
+    STEP_UP_COOKIE_NAME: str = "wcm_step_up"
+    STEP_UP_EXPIRE_MINUTES: int = 5
     COOKIE_SECURE: bool = False
     COOKIE_DOMAIN: str | None = None
 
@@ -35,6 +37,18 @@ class Settings(BaseSettings):
     AGENT_HEARTBEAT_TIMEOUT: int = 90
     AGENT_ENROLLMENT_TTL_MINUTES: int = 15
     ENABLE_REMOTE_COMMANDS: bool = False
+    ENABLE_LOW_TERMINAL: bool = False
+    ENABLE_PRIVILEGED_TERMINAL: bool = False
+    TERMINAL_TICKET_TTL_SECONDS: int = 60
+    TERMINAL_AUTH_TIMEOUT_SECONDS: int = 5
+    TERMINAL_IDLE_TIMEOUT_SECONDS: int = 10 * 60
+    TERMINAL_MAX_LIFETIME_SECONDS: int = 30 * 60
+    TERMINAL_INPUT_FRAME_BYTES: int = 4 * 1024
+    TERMINAL_OUTPUT_FRAME_BYTES: int = 32 * 1024
+    TERMINAL_QUEUE_BYTES: int = 1024 * 1024
+    TERMINAL_MAX_GLOBAL_PRIVILEGED: int = 16
+    STEP_UP_RATE_LIMIT_ATTEMPTS: int = 5
+    STEP_UP_RATE_LIMIT_WINDOW_SECONDS: int = 900
     MAX_TASK_TARGETS: int = 32
     TASK_ACK_TIMEOUT_SECONDS: int = 10
     TASK_CANCEL_TIMEOUT_SECONDS: int = 10
@@ -57,6 +71,14 @@ class Settings(BaseSettings):
     FILE_TRANSFER_TIMEOUT_SECONDS: int = 20
     FILE_UPLOAD_PARTIAL_TTL_HOURS: int = 24
     FILE_UPLOAD_RETENTION_HOURS: int = 7 * 24
+    UPDATE_TRUSTED_KEYS_DIR: Path = Path(__file__).parent / "update_keys"
+    UPDATE_CHUNK_BYTES: int = 512 * 1024
+    UPDATE_TRANSFER_CONCURRENCY: int = 4
+    UPDATE_TRANSFER_TIMEOUT_SECONDS: int = 30
+    UPDATE_HEALTH_TIMEOUT_SECONDS: int = 120
+    UPDATE_MAX_ENTRIES: int = 10_000
+    UPDATE_MAX_EXPANDED_BYTES: int = 500 * 1024 * 1024
+    UPDATE_MAX_TARGETS: int = 32
 
     # First administrator bootstrap. The password is consumed only when the
     # users table is empty; production deployments should use *_FILE.

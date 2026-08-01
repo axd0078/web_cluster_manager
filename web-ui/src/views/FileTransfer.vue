@@ -25,7 +25,8 @@ const historyLoading = ref(false)
 const { lastMessage } = useWebSocket()
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-const canTransfer = computed(() => userStore.user?.role === 'admin' || userStore.user?.role === 'operator')
+const canTransfer = computed(() => userStore.hasPermission('files.write_sandbox'))
+const canOverwrite = computed(() => userStore.hasPermission('files.overwrite'))
 const onlineNodes = computed(() => nodeStore.onlineNodes)
 
 watch(lastMessage, message => {
@@ -261,7 +262,9 @@ function statusType(status: string): 'success' | 'warning' | 'danger' | 'info' |
               </el-input>
             </el-form-item>
             <el-form-item>
-              <el-checkbox v-model="overwrite">允许原子覆盖同名文件</el-checkbox>
+              <el-checkbox v-model="overwrite" :disabled="!canOverwrite">
+                允许原子覆盖同名文件（需要管理员二次认证）
+              </el-checkbox>
             </el-form-item>
             <el-button type="primary" :loading="busy" @click="startTransfer">
               上传并开始分发

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.connection_manager import manager
 from database import get_db
-from middleware.auth import get_current_user, require_role
+from middleware.auth import require_permission
 from models.node import AuditLog, ContainerResource
 from models.user import User
 from schemas.agent import ContainerActionRequest, ContainerResponse
@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/v2/containers", tags=["containers"])
 async def list_host_containers(
     node_id: str,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(get_current_user),
+    _user: User = Depends(require_permission("cluster.read")),
 ):
     result = await db.execute(
         select(ContainerResource)
@@ -35,7 +35,7 @@ async def container_action(
     container_id: str,
     body: ContainerActionRequest,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_permission("containers.control")),
 ):
     result = await db.execute(select(ContainerResource).where(ContainerResource.id == container_id))
     container = result.scalar_one_or_none()
@@ -62,7 +62,7 @@ async def container_logs(
     container_id: str,
     tail: int = Query(200, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_permission("containers.logs")),
 ):
     result = await db.execute(select(ContainerResource).where(ContainerResource.id == container_id))
     container = result.scalar_one_or_none()

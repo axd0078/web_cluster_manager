@@ -9,6 +9,7 @@ import platform
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import requests
 
@@ -20,7 +21,8 @@ try:
     from .monitor import SystemMonitor
     from .task_profiles import TaskProfileStore
     from .task_runner import AgentTaskRunner
-    from .updater import AgentUpdater
+    from .terminal_runner import AgentTerminalManager
+    from .update_receiver import UpdateReceiver
 except ImportError:  # Script execution from the agent directory.
     from config import AgentConfig
     from connection import AgentConnection, AgentCredentialRejected, get_local_ip, get_os_info
@@ -29,7 +31,8 @@ except ImportError:  # Script execution from the agent directory.
     from monitor import SystemMonitor
     from task_profiles import TaskProfileStore
     from task_runner import AgentTaskRunner
-    from updater import AgentUpdater
+    from terminal_runner import AgentTerminalManager
+    from update_receiver import UpdateReceiver
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("agent")
@@ -49,12 +52,32 @@ class Agent:
             min_free_bytes=config.min_transfer_free_bytes,
             partial_ttl_seconds=config.transfer_partial_ttl_seconds,
         )
+        self.update_receiver = UpdateReceiver(
+            config.update_spool_dir,
+            config.update_trusted_keys_dir,
+            enabled=config.enable_agent_updates,
+            active_pointer=config.update_active_pointer,
+            max_package_bytes=config.max_update_bytes,
+            max_expanded_bytes=config.max_update_expanded_bytes,
+            max_entries=config.max_update_entries,
+            chunk_bytes=config.file_chunk_bytes,
+            min_free_bytes=config.min_update_free_bytes,
+        )
         self._last_docker_report = 0.0
+        self._update_health_pending = False
         self.task_profiles = TaskProfileStore(config.data_dir / "task_profiles.json")
         self.task_runner = AgentTaskRunner(config, self.task_profiles, self._send_result)
+        self.terminal = AgentTerminalManager(
+            lambda: self.config.node_id,
+            self.task_profiles,
+            self.conn.send,
+            enabled=config.enable_low_terminal,
+            max_sessions=config.terminal_max_sessions,
+        )
         self.conn.on_message(self._handle_message)
-        self.conn.on_connect(self._send_capabilities)
+        self.conn.on_connect(self._on_connect)
         self.conn.on_disconnect(self.task_runner.shutdown)
+        self.conn.on_disconnect(self.terminal.shutdown)
 
     async def _send_result(self, message_type: str, request_id: str, payload: dict) -> bool:
         return await self.conn.send({
@@ -68,7 +91,10 @@ class Agent:
         request_id = str(msg.get("request_id") or "")
         payload = msg.get("payload") if isinstance(msg.get("payload"), dict) else {}
 
-        if msg_type == "task":
+        if msg_type.startswith("terminal_"):
+            await self.terminal.handle(msg)
+
+        elif msg_type == "task":
             task_type = str(payload.get("task_type") or msg.get("command") or "")
             params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
             error = self.task_runner.validate_request(
@@ -140,21 +166,84 @@ class Agent:
             result = self.file_receiver.cancel(payload)
             await self._send_result("file_transfer_result", request_id, result)
 
-        elif msg_type == "update":
-            backup_dir = self.config.data_dir / "backup" / f"backup_{time.strftime('%Y%m%d_%H%M%S')}"
-            updater = AgentUpdater(Path(__file__).parent, backup_dir)
-            result = updater.apply_update(payload)
+        elif msg_type.startswith("update_"):
+            update_payload = dict(payload)
+            update_payload.setdefault("execution_id", request_id)
+            if msg_type.startswith("update_transfer_"):
+                update_payload.setdefault(
+                    "transfer_id",
+                    str(payload.get("transfer_id") or update_payload["execution_id"]),
+                )
+            handler_names = {
+                "update_transfer_init": "init",
+                "update_transfer_chunk": "chunk",
+                "update_transfer_commit": "commit",
+                "update_transfer_cancel": "cancel",
+                "update_activate": "activate",
+                "update_status": "status",
+                "update_cancel": "cancel",
+                "update_rollback": "rollback",
+                "update_health_ack": "health_ack",
+            }
+            handler_name = handler_names.get(msg_type)
+            if handler_name is None:
+                result = {
+                    "success": False,
+                    "phase": "protocol",
+                    "error": "unsupported Agent update protocol message",
+                }
+            else:
+                handler = getattr(self.update_receiver, handler_name)
+                result = await asyncio.to_thread(handler, update_payload)
             await self._send_result("update_result", request_id, result)
+            if msg_type == "update_health_ack" and result.get("success"):
+                self._update_health_pending = False
+                await self._send_capabilities()
 
         elif msg_type == "ping":
             await self.conn.send({"type": "pong", "request_id": request_id, "payload": {}})
 
     async def _send_capabilities(self) -> None:
         self.task_profiles.reload_if_changed()
+        capabilities = self.task_profiles.capabilities()
+        if not self.config.enable_low_terminal:
+            capabilities["terminal_protocol"] = 0
+            capabilities["terminal_profiles"] = []
+        capabilities.update(self.update_receiver.capabilities())
         await self.conn.send({
             "type": "agent_capabilities",
-            "payload": self.task_profiles.capabilities(),
+            "payload": capabilities,
         })
+
+    async def _on_connect(self) -> None:
+        await self._send_capabilities()
+        active = self.update_receiver.active_release()
+        execution_id = str(active.get("activation_execution_id") or "")
+        self._update_health_pending = bool(execution_id)
+        for status in self.update_receiver.changed_statuses(include_all=True):
+            await self.conn.send({
+                "type": "update_status",
+                "request_id": str(status.get("execution_id") or ""),
+                "payload": status,
+            })
+
+    async def _send_update_health(self) -> bool:
+        active = self.update_receiver.active_release()
+        execution_id = str(active.get("activation_execution_id") or "")
+        if not execution_id:
+            self._update_health_pending = False
+            return True
+        sent = await self.conn.send({
+            "type": "update_health",
+            "request_id": f"health-{execution_id}",
+            "payload": {
+                "execution_id": execution_id,
+                "release_id": str(active.get("release_id") or ""),
+                "version": str(active.get("version") or self.config.version),
+                "operation": str(active.get("activation_operation") or "activate"),
+            },
+        })
+        return sent
 
     async def enroll(self) -> bool:
         if not self.config.enrollment_token:
@@ -163,6 +252,11 @@ class Agent:
         docker_available = await self.docker.available()
         system = platform.system().lower()
         platform_type = "docker-host" if docker_available else (system if system in {"windows", "linux"} else "unknown")
+        profile_capabilities = self.task_profiles.capabilities()
+        if not self.config.enable_low_terminal:
+            profile_capabilities["terminal_protocol"] = 0
+            profile_capabilities["terminal_profiles"] = []
+        profile_capabilities.update(self.update_receiver.capabilities())
         body = {
             "agent_id": self.config.agent_id,
             "ip": self.config.client_ip or get_local_ip(),
@@ -174,7 +268,7 @@ class Agent:
                 "docker": docker_available,
                 "remote_commands": self.config.enable_remote_commands,
                 "file_transfer_v2": True,
-                **self.task_profiles.capabilities(),
+                **profile_capabilities,
             },
         }
 
@@ -208,7 +302,12 @@ class Agent:
             if not self.conn._ws:
                 continue
             try:
-                await self.conn.send({"type": "monitor_data", "payload": self.monitor.collect()})
+                monitor_sent = await self.conn.send({
+                    "type": "monitor_data",
+                    "payload": self.monitor.collect(),
+                })
+                if monitor_sent and self._update_health_pending:
+                    await self._send_update_health()
                 now = time.monotonic()
                 if now - self._last_docker_report >= self.config.docker_interval:
                     inventory = await self.docker.list_containers()
@@ -218,6 +317,12 @@ class Agent:
                     if self.task_profiles.last_error:
                         logger.error("Task profile reload failed: %s", self.task_profiles.last_error)
                     await self._send_capabilities()
+                for status in self.update_receiver.changed_statuses():
+                    await self.conn.send({
+                        "type": "update_status",
+                        "request_id": str(status.get("execution_id") or ""),
+                        "payload": status,
+                    })
             except Exception:
                 logger.exception("Telemetry collection failed")
 
@@ -248,10 +353,18 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     if args.data_dir:
         initial.data_dir = Path(args.data_dir)
         initial.transfer_root = initial.data_dir / "transfers"
+        initial.update_spool_dir = initial.data_dir / "update-spool"
     config_path = initial.data_dir / "agent_config.json"
     config = AgentConfig.load(config_path)
     config.data_dir = initial.data_dir
     config.transfer_root = initial.transfer_root
+    config.update_spool_dir = Path(
+        os.getenv("WCM_UPDATE_SPOOL_DIR", str(initial.update_spool_dir))
+    )
+    if "WCM_UPDATE_TRUSTED_KEYS_DIR" in os.environ:
+        config.update_trusted_keys_dir = Path(os.environ["WCM_UPDATE_TRUSTED_KEYS_DIR"])
+    if "WCM_UPDATE_ACTIVE_POINTER" in os.environ:
+        config.update_active_pointer = Path(os.environ["WCM_UPDATE_ACTIVE_POINTER"])
     config.enrollment_token = os.getenv("WCM_ENROLLMENT_TOKEN", "")
     # Remote commands require an explicit opt-in on every Agent start. Capacity
     # and concurrency environment variables intentionally override persisted
@@ -259,11 +372,22 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     config.enable_remote_commands = (
         os.getenv("WCM_ENABLE_REMOTE_COMMANDS", "false").lower() == "true"
     )
+    config.enable_low_terminal = (
+        os.getenv("WCM_ENABLE_LOW_TERMINAL", "false").lower() == "true"
+    )
+    config.enable_agent_updates = (
+        os.getenv("WCM_ENABLE_AGENT_UPDATES", "false").lower() == "true"
+    )
     integer_overrides = {
         "WCM_TASK_CONCURRENCY": "task_concurrency",
         "WCM_TASK_BACKUP_RETENTION_DAYS": "task_backup_retention_days",
         "WCM_TASK_BACKUP_TOTAL_BYTES": "task_backup_total_bytes",
         "WCM_TASK_BACKUP_MIN_FREE_BYTES": "task_backup_min_free_bytes",
+        "WCM_TERMINAL_MAX_SESSIONS": "terminal_max_sessions",
+        "WCM_MAX_UPDATE_BYTES": "max_update_bytes",
+        "WCM_MAX_UPDATE_EXPANDED_BYTES": "max_update_expanded_bytes",
+        "WCM_MAX_UPDATE_ENTRIES": "max_update_entries",
+        "WCM_MIN_UPDATE_FREE_BYTES": "min_update_free_bytes",
     }
     for environment_name, attribute in integer_overrides.items():
         if environment_name in os.environ:
@@ -277,6 +401,17 @@ def build_config(args: argparse.Namespace) -> AgentConfig:
     config.client_ip = get_local_ip()
     config.hostname = platform.node()
     config.os_info = get_os_info()
+    if os.getenv("WCM_ACTIVE_VERSION"):
+        config.version = os.environ["WCM_ACTIVE_VERSION"]
+    parsed_server = urlsplit(config.server_url)
+    if config.enable_low_terminal and (
+        parsed_server.scheme not in {"ws", "wss"}
+        or (
+            parsed_server.scheme == "ws"
+            and parsed_server.hostname not in {"127.0.0.1", "::1", "localhost"}
+        )
+    ):
+        raise ValueError("Low-privilege terminal requires WSS except on loopback")
     return config
 
 
@@ -288,11 +423,14 @@ def main() -> int:
     parser.add_argument("--data-dir", default=None, help="persistent credential and runtime directory")
     parser.add_argument("--enroll-only", action="store_true", help="enroll securely, save credential, then exit")
     args = parser.parse_args()
-    agent = Agent(build_config(args))
     try:
+        agent = Agent(build_config(args))
         if args.enroll_only:
             return 0 if asyncio.run(agent.enroll()) else 1
         return 0 if asyncio.run(agent.run()) else 1
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
     except KeyboardInterrupt:
         logger.info("Agent stopped")
         return 0

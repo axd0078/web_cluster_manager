@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "log_profiles": {
     "application": {
       "root": "C:\\ProgramData\\WCM\\logs",
@@ -26,6 +26,24 @@
         "C:\\Windows\\System32\\whoami.exe"
       ],
       "timeout": 15
+    }
+  },
+  "terminal_profiles": {
+    "current-identity": {
+      "argv": [
+        "C:\\Windows\\System32\\whoami.exe",
+        "/all"
+      ],
+      "timeout": 15,
+      "output_limit": 262144
+    },
+    "network-summary": {
+      "argv": [
+        "C:\\Windows\\System32\\ipconfig.exe",
+        "/all"
+      ],
+      "timeout": 30,
+      "output_limit": 1048576
     }
   }
 }

@@ -33,17 +33,19 @@ const router = createRouter({
           path: 'tasks',
           name: 'Tasks',
           component: () => import('../views/Tasks.vue'),
-          meta: { roles: ['admin', 'operator'] },
+          meta: { permission: 'tasks.low' },
         },
         {
           path: 'files',
           name: 'FileTransfer',
           component: () => import('../views/FileTransfer.vue'),
+          meta: { permission: 'files.write_sandbox' },
         },
         {
           path: 'terminal',
           name: 'Terminal',
           component: () => import('../views/Terminal.vue'),
+          meta: { permission: 'terminal.low' },
         },
         {
           path: 'monitor',
@@ -54,16 +56,19 @@ const router = createRouter({
           path: 'updates',
           name: 'Updates',
           component: () => import('../views/Updates.vue'),
+          meta: { permission: 'updates.read' },
         },
         {
           path: 'audit',
           name: 'AuditLogs',
           component: () => import('../views/AuditLogs.vue'),
+          meta: { permission: 'audit.read' },
         },
         {
           path: 'settings',
           name: 'Settings',
           component: () => import('../views/Settings.vue'),
+          meta: { permission: 'settings.read' },
         },
       ],
     },
@@ -75,8 +80,8 @@ router.beforeEach(async to => {
   await user.fetchUser()
   if (to.meta.public) return user.isAuthenticated ? '/' : true
   if (!user.isAuthenticated) return '/login'
-  const roles = to.meta.roles as string[] | undefined
-  if (roles && (!user.user || !roles.includes(user.user.role))) return '/'
+  const permission = to.meta.permission as string | undefined
+  if (permission && !user.hasPermission(permission)) return '/'
   return true
 })
 

@@ -37,6 +37,13 @@ class CommandProfile:
     timeout: int
 
 
+@dataclass(frozen=True)
+class TerminalProfile:
+    argv: tuple[str, ...]
+    timeout: int
+    output_limit: int
+
+
 class TaskProfileStore:
     """Loads locally trusted task aliases without exposing their values to Server."""
 
@@ -46,6 +53,8 @@ class TaskProfileStore:
         self.backup_profiles: dict[str, BackupProfile] = {}
         self.service_profiles: dict[str, ServiceProfile] = {}
         self.command_profiles: dict[str, CommandProfile] = {}
+        self.terminal_profiles: dict[str, TerminalProfile] = {}
+        self.format_version = 0
         self._signature: tuple[int, int] | None = None
         self.last_error: str | None = None
         self.reload(force=True)
@@ -73,6 +82,8 @@ class TaskProfileStore:
             self.backup_profiles = {}
             self.service_profiles = {}
             self.command_profiles = {}
+            self.terminal_profiles = {}
+            self.format_version = 0
             self._signature = None
             self.last_error = f"task profile file not found: {self.path}"
             return
@@ -85,6 +96,8 @@ class TaskProfileStore:
             self.backup_profiles = {}
             self.service_profiles = {}
             self.command_profiles = {}
+            self.terminal_profiles = {}
+            self.format_version = 0
             self._signature = signature
             self.last_error = str(exc)
             return
@@ -93,6 +106,8 @@ class TaskProfileStore:
             self.backup_profiles,
             self.service_profiles,
             self.command_profiles,
+            self.terminal_profiles,
+            self.format_version,
         ) = parsed
         self._signature = signature
         self.last_error = None
@@ -106,16 +121,32 @@ class TaskProfileStore:
                 "restart_service": sorted(self.service_profiles),
                 "batch_command": sorted(self.command_profiles),
             },
+            "terminal_protocol": 3 if self.format_version == 2 else 0,
+            "terminal_profiles": (
+                sorted(self.terminal_profiles) if self.format_version == 2 else []
+            ),
         }
 
     def _parse(self, raw: object):
-        if not isinstance(raw, dict) or raw.get("version") != 1:
-            raise TaskProfileError("task profile version must be 1")
+        if not isinstance(raw, dict) or raw.get("version") not in {1, 2}:
+            raise TaskProfileError("task profile version must be 1 or 2")
+        version = int(raw["version"])
         log_profiles = self._parse_logs(raw.get("log_profiles", {}))
         backup_profiles = self._parse_backups(raw.get("backup_profiles", {}))
         service_profiles = self._parse_services(raw.get("service_profiles", {}))
         command_profiles = self._parse_commands(raw.get("command_profiles", {}))
-        return log_profiles, backup_profiles, service_profiles, command_profiles
+        terminal_profiles = (
+            self._parse_terminals(raw.get("terminal_profiles", {}))
+            if version == 2 else {}
+        )
+        return (
+            log_profiles,
+            backup_profiles,
+            service_profiles,
+            command_profiles,
+            terminal_profiles,
+            version,
+        )
 
     def _mapping(self, raw: object, section: str) -> dict:
         if not isinstance(raw, dict) or len(raw) > 128:
@@ -210,4 +241,42 @@ class TaskProfileStore:
             if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 300:
                 raise TaskProfileError("command timeout must be between 1 and 300 seconds")
             output[name] = CommandProfile(argv=tuple(argv), timeout=timeout)
+        return output
+
+    def _parse_terminals(self, raw: object) -> dict[str, TerminalProfile]:
+        output: dict[str, TerminalProfile] = {}
+        for name, value in self._mapping(raw, "terminal_profiles").items():
+            if not isinstance(value, dict):
+                raise TaskProfileError("terminal profile must be an object")
+            argv = value.get("argv")
+            timeout = value.get("timeout", 30)
+            output_limit = value.get("output_limit", 1024 * 1024)
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or len(argv) > 64
+                or any(
+                    not isinstance(part, str)
+                    or not part
+                    or len(part) > 1000
+                    or "\x00" in part
+                    for part in argv
+                )
+            ):
+                raise TaskProfileError("terminal argv is invalid")
+            if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= 300:
+                raise TaskProfileError("terminal timeout must be between 1 and 300 seconds")
+            if (
+                isinstance(output_limit, bool)
+                or not isinstance(output_limit, int)
+                or not 1024 <= output_limit <= 16 * 1024 * 1024
+            ):
+                raise TaskProfileError(
+                    "terminal output_limit must be between 1024 and 16777216 bytes"
+                )
+            output[name] = TerminalProfile(
+                argv=tuple(argv),
+                timeout=timeout,
+                output_limit=output_limit,
+            )
         return output

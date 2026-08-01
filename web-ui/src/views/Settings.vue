@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { agentsApi, type EnrollmentTokenInfo } from '../api/agents'
 import { authApi } from '../api/auth'
+import { nodesApi } from '../api/nodes'
+import { terminalApi } from '../api/terminal'
 import { useUserStore } from '../stores/user'
 
 const user = useUserStore()
@@ -13,6 +15,12 @@ const rawToken = ref('')
 const expiresAt = ref('')
 const tokens = ref<EnrollmentTokenInfo[]>([])
 const passwordForm = ref({ current: '', next: '' })
+const brokers = ref<any[]>([])
+const brokerNodes = ref<any[]>([])
+const selectedBrokerNode = ref('')
+const rawBrokerToken = ref('')
+const users = ref<any[]>([])
+const userForm = ref({ username: '', password: '', role: 'user' as 'user' | 'admin' })
 
 const apiUrl = computed(() => `${location.origin}/api/v2`)
 const wsUrl = computed(() => `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/agent`)
@@ -27,8 +35,58 @@ const installHint = computed(() => rawToken.value ? [
 ].join('\n') : '')
 
 async function loadTokens() {
-  if (!user.isAdmin) return
+  if (!user.hasPermission('agents.manage')) return
   tokens.value = (await agentsApi.listEnrollmentTokens()).data
+}
+
+async function loadBrokers() {
+  if (!user.hasPermission('brokers.read')) return
+  const [brokerResponse, nodeResponse] = await Promise.all([
+    terminalApi.brokers(),
+    nodesApi.list(),
+  ])
+  brokers.value = brokerResponse.data
+  brokerNodes.value = nodeResponse.data
+}
+
+async function loadUsers() {
+  if (!user.hasPermission('users.read')) return
+  users.value = (await authApi.listUsers()).data
+}
+
+async function createUser() {
+  await authApi.createUser(
+    userForm.value.username,
+    userForm.value.password,
+    userForm.value.role,
+  )
+  userForm.value = { username: '', password: '', role: 'user' }
+  await loadUsers()
+}
+
+async function updateAccount(
+  account: any,
+  data: { role?: 'admin' | 'user'; disabled?: boolean },
+) {
+  await authApi.updateUser(account.id, data)
+  await loadUsers()
+}
+
+async function rotateBrokerCredential() {
+  const response = await terminalApi.rotateBrokerCredential(selectedBrokerNode.value)
+  rawBrokerToken.value = response.data.broker_token
+  ElMessage.warning('Broker 凭据原文只显示一次，请立即在目标宿主机完成安装')
+  await loadBrokers()
+}
+
+async function revokeBrokerCredential(nodeId: string) {
+  await ElMessageBox.confirm(
+    '撤销后会立即断开 Broker 和该节点的高权限终端。',
+    '撤销 Broker 凭据',
+    { type: 'warning' },
+  )
+  await terminalApi.revokeBrokerCredential(nodeId)
+  await loadBrokers()
 }
 
 async function createToken() {
@@ -61,7 +119,11 @@ async function changePassword() {
   ElMessage.success('密码已更新')
 }
 
-onMounted(loadTokens)
+onMounted(() => Promise.all([loadTokens(), loadBrokers(), loadUsers()]))
+watch(
+  () => user.user?.permissions.join(','),
+  () => Promise.all([loadTokens(), loadBrokers(), loadUsers()]),
+)
 </script>
 
 <template>
@@ -74,7 +136,7 @@ onMounted(loadTokens)
         <el-form-item><el-button :disabled="passwordForm.next.length < 12" @click="changePassword">更新密码</el-button></el-form-item>
       </el-form>
     </el-card>
-    <el-alert v-if="!user.isAdmin" type="warning" :closable="false" title="仅管理员可以签发或撤销 Agent 注册令牌" />
+    <el-alert v-if="!user.hasPermission('agents.manage')" type="warning" :closable="false" title="签发或撤销 Agent 凭据需要管理员 5 分钟高权限授权" />
     <template v-else>
       <el-card header="签发一次性注册令牌" style="margin-bottom: 16px">
         <el-form inline>
@@ -103,6 +165,136 @@ onMounted(loadTokens)
         </el-table>
       </el-card>
     </template>
+
+    <el-card
+      v-if="user.hasPermission('brokers.read')"
+      header="独立特权 Broker"
+      style="margin-top: 16px"
+    >
+      <el-alert
+        type="warning"
+        :closable="false"
+        title="Broker 以 root/SYSTEM 运行，凭据与普通 Agent 完全独立。"
+        style="margin-bottom: 12px"
+      />
+      <el-form v-if="user.hasPermission('brokers.manage')" inline>
+        <el-form-item label="注册节点">
+          <el-select v-model="selectedBrokerNode" style="width: 280px">
+            <el-option
+              v-for="node in brokerNodes"
+              :key="node.id"
+              :label="`${node.hostname || node.ip} (${node.platform})`"
+              :value="node.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            type="danger"
+            :disabled="!selectedBrokerNode"
+            @click="rotateBrokerCredential"
+          >
+            生成/轮换 Broker 凭据
+          </el-button>
+        </el-form-item>
+      </el-form>
+      <el-alert
+        v-if="rawBrokerToken"
+        type="success"
+        :closable="false"
+        title="一次性显示的 Broker 凭据"
+      >
+        <pre class="command">{{ rawBrokerToken }}</pre>
+      </el-alert>
+      <el-table :data="brokers" size="small" style="margin-top: 12px">
+        <el-table-column prop="node_id" label="节点 ID" min-width="260" />
+        <el-table-column prop="credential_state" label="凭据状态" width="120" />
+        <el-table-column label="连接" width="100">
+          <template #default="{ row }">
+            <el-tag :type="row.online ? 'success' : 'info'">
+              {{ row.online ? '在线' : '离线' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="last_used_at" label="最近连接" width="200" />
+        <el-table-column v-if="user.hasPermission('brokers.manage')" label="操作" width="100">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.credential_state !== 'revoked'"
+              size="small"
+              type="danger"
+              @click="revokeBrokerCredential(row.node_id)"
+            >
+              撤销
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+
+    <el-card
+      v-if="user.hasPermission('users.read')"
+      header="用户与双身份"
+      style="margin-top: 16px"
+    >
+      <el-form v-if="user.hasPermission('users.manage')" inline>
+        <el-form-item label="用户名">
+          <el-input v-model="userForm.username" maxlength="100" />
+        </el-form-item>
+        <el-form-item label="初始密码">
+          <el-input v-model="userForm.password" type="password" show-password />
+        </el-form-item>
+        <el-form-item label="身份">
+          <el-select v-model="userForm.role" style="width: 120px">
+            <el-option label="普通用户" value="user" />
+            <el-option label="管理员" value="admin" />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button
+            type="primary"
+            :disabled="userForm.username.length < 3 || userForm.password.length < 12"
+            @click="createUser"
+          >
+            创建用户
+          </el-button>
+        </el-form-item>
+      </el-form>
+      <el-table :data="users" size="small">
+        <el-table-column prop="username" label="用户名" />
+        <el-table-column label="身份" width="150">
+          <template #default="{ row }">
+            <el-select
+              :model-value="row.role"
+              :disabled="!user.hasPermission('users.manage')"
+              @change="(role: 'admin' | 'user') => updateAccount(row, { role })"
+            >
+              <el-option label="普通用户" value="user" />
+              <el-option label="管理员" value="admin" />
+            </el-select>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="120">
+          <template #default="{ row }">
+            <el-tag :type="row.disabled ? 'danger' : 'success'">
+              {{ row.disabled ? '已禁用' : '启用' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="user.hasPermission('users.manage')" label="操作" width="120">
+          <template #default="{ row }">
+            <el-button
+              v-if="row.id !== user.user?.id"
+              size="small"
+              :type="row.disabled ? 'success' : 'danger'"
+              @click="updateAccount(row, { disabled: !row.disabled })"
+            >
+              {{ row.disabled ? '启用' : '禁用' }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
   </div>
 </template>
 

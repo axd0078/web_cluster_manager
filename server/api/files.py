@@ -16,8 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from core.permissions import has_permissions
 from database import get_db
-from middleware.auth import get_current_user, require_role
+from middleware.auth import get_current_user, has_step_up, require_permission
 from models.node import (
     AuditLog, FileTransfer, FileTransferTarget, FileUpload, Node,
 )
@@ -83,7 +84,10 @@ async def _get_upload_for_user(
     upload_id: str, user: User, db: AsyncSession,
 ) -> FileUpload:
     upload = await db.get(FileUpload, upload_id)
-    if upload is None or (user.role != "admin" and upload.created_by != user.id):
+    if upload is None or (
+        not has_permissions(user.role, "history.all")
+        and upload.created_by != user.id
+    ):
         raise HTTPException(status_code=404, detail="上传会话不存在")
     return upload
 
@@ -185,7 +189,7 @@ class TransferCreate(BaseModel):
 async def create_upload(
     body: UploadCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("files.write_sandbox")),
 ):
     if body.size > settings.MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="文件超过允许大小")
@@ -239,7 +243,7 @@ async def list_uploads(
     user: User = Depends(get_current_user),
 ):
     query = select(FileUpload).order_by(FileUpload.created.desc()).limit(limit)
-    if user.role != "admin":
+    if not has_permissions(user.role, "history.all"):
         query = query.where(FileUpload.created_by == user.id)
     if status:
         query = query.where(FileUpload.status == status)
@@ -263,7 +267,7 @@ async def upload_chunk(
     chunk_sha256: str = Query(...),
     chunk: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("files.write_sandbox")),
 ):
     upload = await _get_upload_for_user(upload_id, user, db)
     if upload.status not in {"uploading", "failed"}:
@@ -315,7 +319,7 @@ async def complete_upload(
     upload_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("files.write_sandbox")),
 ):
     upload = await _get_upload_for_user(upload_id, user, db)
     if upload.status == "ready":
@@ -355,7 +359,7 @@ async def cancel_upload(
     upload_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("files.write_sandbox")),
 ):
     upload = await _get_upload_for_user(upload_id, user, db)
     active = await db.scalar(
@@ -382,8 +386,14 @@ async def create_transfer(
     body: TransferCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("files.write_sandbox")),
 ):
+    if body.overwrite and not has_permissions(
+        user.role,
+        "files.overwrite",
+        step_up=has_step_up(request, user),
+    ):
+        raise HTTPException(status_code=403, detail="文件覆盖需要管理员二次认证")
     unique_targets = list(dict.fromkeys(body.target_node_ids))
     if len(unique_targets) > settings.MAX_TRANSFER_TARGETS:
         raise HTTPException(status_code=400, detail="目标节点数量超过限制")
@@ -435,7 +445,7 @@ async def list_transfers(
     user: User = Depends(get_current_user),
 ):
     query = select(FileTransfer).order_by(FileTransfer.created.desc()).limit(limit)
-    if user.role != "admin":
+    if not has_permissions(user.role, "history.all"):
         query = query.where(FileTransfer.created_by == user.id)
     result = await db.execute(query)
     transfers = result.scalars().all()
@@ -462,7 +472,10 @@ async def get_transfer(
     user: User = Depends(get_current_user),
 ):
     transfer = await db.get(FileTransfer, transfer_id)
-    if transfer is None or (user.role != "admin" and transfer.created_by != user.id):
+    if transfer is None or (
+        not has_permissions(user.role, "history.all")
+        and transfer.created_by != user.id
+    ):
         raise HTTPException(status_code=404, detail="传输任务不存在")
     result = await db.execute(
         select(FileTransferTarget).where(
@@ -477,11 +490,20 @@ async def retry_transfer(
     transfer_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("files.write_sandbox")),
 ):
     transfer = await db.get(FileTransfer, transfer_id)
-    if transfer is None or (user.role != "admin" and transfer.created_by != user.id):
+    if transfer is None or (
+        not has_permissions(user.role, "history.all")
+        and transfer.created_by != user.id
+    ):
         raise HTTPException(status_code=404, detail="传输任务不存在")
+    if transfer.overwrite and not has_permissions(
+        user.role,
+        "files.overwrite",
+        step_up=has_step_up(request, user),
+    ):
+        raise HTTPException(status_code=403, detail="文件覆盖重试需要管理员二次认证")
     if file_transfer_service.is_running(transfer.id):
         raise HTTPException(status_code=409, detail="传输仍在运行，请等待本轮结束后再续传")
     upload = await db.get(FileUpload, transfer.source) if transfer.source else None

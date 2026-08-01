@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from middleware.auth import get_current_user, require_role
+from middleware.auth import require_permission
 from models.node import AuditLog
 
 router = APIRouter(prefix="/api/v2/audit", tags=["audit"])
@@ -24,7 +24,7 @@ async def list_logs(
     limit: int = Query(100, le=1000),
     offset: int = Query(0),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("audit.read")),
 ):
     q = select(AuditLog).order_by(AuditLog.created.desc())
     if action:
@@ -52,7 +52,7 @@ async def export_logs(
     action: str | None = Query(None),
     user_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("audit.export")),
 ):
     q = select(AuditLog).order_by(AuditLog.created.desc())
     if action:

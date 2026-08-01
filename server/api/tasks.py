@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import PurePosixPath, PureWindowsPath
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_db
-from middleware.auth import require_role
+from core.permissions import has_permissions
+from middleware.auth import has_step_up, require_permission
 from models.node import AuditLog, Subtask, Task
 from models.user import User
 from schemas.task import (
@@ -25,7 +26,7 @@ from services.task_service import _parse_result, resolve_targets, task_service
 
 router = APIRouter(prefix="/api/v2/tasks", tags=["tasks"])
 
-OPERATOR_TASK_TYPES = {"health_check", "clean_logs", "backup_files"}
+LOW_RISK_TASK_TYPES = {"health_check", "clean_logs", "backup_files"}
 TASK_TEMPLATES = [
     {"type": "health_check", "title": "健康检查", "params": {}},
     {
@@ -41,14 +42,29 @@ TASK_TEMPLATES = [
 
 def _owned_task_query(task_id: str, user: User):
     query = select(Task).where(Task.id == task_id)
-    if user.role != "admin":
+    if not has_permissions(user.role, "history.all"):
         query = query.where(Task.created_by == user.id)
     return query
 
 
-def _validate_task_role(user: User, task_type: str) -> None:
-    if user.role == "operator" and task_type not in OPERATOR_TASK_TYPES:
-        raise HTTPException(status_code=403, detail="operator 不能执行此任务类型")
+def _task_is_high_risk(task_type: str, params: dict | None = None) -> bool:
+    if task_type in {"restart_service", "batch_command"}:
+        return True
+    return task_type == "clean_logs" and (params or {}).get("dry_run") is False
+
+
+def _validate_task_permission(
+    request: Request,
+    user: User,
+    task_type: str,
+    params: dict | None = None,
+) -> None:
+    permission = "tasks.high" if _task_is_high_risk(task_type, params) else "tasks.low"
+    if not has_permissions(user.role, permission, step_up=has_step_up(request, user)):
+        raise HTTPException(
+            status_code=403,
+            detail="此任务需要管理员二次认证" if user.role == "admin" else "权限不足",
+        )
     if task_type == "batch_command" and not settings.ENABLE_REMOTE_COMMANDS:
         raise HTTPException(status_code=403, detail="Server 远程命令开关未开启")
 
@@ -109,14 +125,14 @@ async def list_tasks(
     task_type: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("tasks.low")),
 ):
     query = (
         select(Task, User.username)
         .outerjoin(User, User.id == Task.created_by)
         .order_by(Task.created.desc())
     )
-    if user.role != "admin":
+    if not has_permissions(user.role, "history.all"):
         query = query.where(Task.created_by == user.id)
     if status:
         query = query.where(Task.status == status)
@@ -130,10 +146,18 @@ async def list_tasks(
 
 
 @router.get("/templates/list")
-async def list_templates(user: User = Depends(require_role("admin", "operator"))):
-    templates = TASK_TEMPLATES
-    if user.role == "operator":
-        templates = [item for item in templates if item["type"] in OPERATOR_TASK_TYPES]
+async def list_templates(
+    request: Request,
+    user: User = Depends(require_permission("tasks.low")),
+):
+    elevated = has_step_up(request, user)
+    templates = [
+        item for item in TASK_TEMPLATES
+        if (
+            item["type"] in LOW_RISK_TASK_TYPES
+            or has_permissions(user.role, "tasks.high", step_up=elevated)
+        )
+    ]
     if not settings.ENABLE_REMOTE_COMMANDS:
         templates = [item for item in templates if item["type"] != "batch_command"]
     return templates
@@ -143,7 +167,7 @@ async def list_templates(user: User = Depends(require_role("admin", "operator"))
 async def resolve_task_targets(
     body: TaskTargets,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_role("admin", "operator")),
+    _user: User = Depends(require_permission("tasks.low")),
 ):
     try:
         _, response = await resolve_targets(db, body)
@@ -155,10 +179,11 @@ async def resolve_task_targets(
 @router.post("/", response_model=TaskResponse, status_code=201)
 async def create_task(
     body: TaskCreate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("tasks.low")),
 ):
-    _validate_task_role(user, body.type)
+    _validate_task_permission(request, user, body.type, body.params)
     if body.type == "backup_files":
         _validate_relative_source(str(body.params["source"]))
     try:
@@ -227,7 +252,7 @@ async def create_task(
 async def get_task(
     task_id: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("tasks.low")),
 ):
     task = await db.scalar(_owned_task_query(task_id, user))
     if task is None:
@@ -262,13 +287,14 @@ async def get_task(
 @router.post("/{task_id}/cancel")
 async def cancel_task(
     task_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("tasks.low")),
 ):
     task = await db.scalar(_owned_task_query(task_id, user))
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    _validate_task_role(user, task.type)
+    _validate_task_permission(request, user, task.type, json.loads(task.params))
     if task.status not in {"queued", "running", "paused"}:
         raise HTTPException(status_code=400, detail="当前任务状态不允许取消")
     db.add(AuditLog(
@@ -285,14 +311,15 @@ async def cancel_task(
 @router.post("/{task_id}/retry")
 async def retry_task(
     task_id: str,
+    request: Request,
     body: TaskRetry = TaskRetry(),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_role("admin", "operator")),
+    user: User = Depends(require_permission("tasks.low")),
 ):
     task = await db.scalar(_owned_task_query(task_id, user))
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    _validate_task_role(user, task.type)
+    _validate_task_permission(request, user, task.type, json.loads(task.params))
     db.add(AuditLog(
         user_id=user.id,
         action="task.retry",

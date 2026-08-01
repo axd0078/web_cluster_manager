@@ -12,7 +12,7 @@ from config import settings
 from core.security import generate_opaque_token, hash_opaque_token
 from core.connection_manager import manager
 from database import get_db
-from middleware.auth import require_role
+from middleware.auth import require_permission
 from models.node import AgentCredential, AuditLog, EnrollmentToken, Node
 from models.user import User
 from schemas.agent import (
@@ -28,7 +28,7 @@ bearer = HTTPBearer(auto_error=False)
 async def create_enrollment_token(
     body: EnrollmentTokenCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_permission("agents.manage")),
 ):
     raw = generate_opaque_token()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=body.ttl_minutes)
@@ -48,7 +48,7 @@ async def create_enrollment_token(
 @router.get("/agent-enrollment-tokens", response_model=list[EnrollmentTokenInfo])
 async def list_enrollment_tokens(
     db: AsyncSession = Depends(get_db),
-    _admin: User = Depends(require_role("admin")),
+    _admin: User = Depends(require_permission("agents.manage")),
 ):
     result = await db.execute(select(EnrollmentToken).order_by(EnrollmentToken.created.desc()).limit(100))
     return result.scalars().all()
@@ -58,7 +58,7 @@ async def list_enrollment_tokens(
 async def revoke_enrollment_token(
     token_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_permission("agents.manage")),
 ):
     result = await db.execute(select(EnrollmentToken).where(EnrollmentToken.id == token_id))
     item = result.scalar_one_or_none()
@@ -146,7 +146,7 @@ async def enroll_agent(
 async def rotate_agent_credential(
     node_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_permission("agents.manage")),
 ):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
@@ -173,7 +173,7 @@ async def rotate_agent_credential(
 async def revoke_agent_credential(
     node_id: str,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_role("admin")),
+    admin: User = Depends(require_permission("agents.manage")),
 ):
     result = await db.execute(select(AgentCredential).where(AgentCredential.node_id == node_id))
     credential = result.scalar_one_or_none()

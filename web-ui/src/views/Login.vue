@@ -26,7 +26,7 @@ async function handleLogin() {
     <el-card class="login-card">
       <div class="login-header">
         <h1>⚡ Web 集群管理系统</h1>
-        <p>Web Cluster Manager v3.1</p>
+        <p>Web Cluster Manager v4.0</p>
       </div>
       <el-form @submit.prevent="handleLogin" label-position="top">
         <el-form-item label="用户名">

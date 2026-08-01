@@ -29,7 +29,7 @@ class Node(Base):
     capabilities: Mapped[str] = mapped_column(Text, default="{}")
     credential_state: Mapped[str] = mapped_column(String(30), default="reenrollment_required")
     status: Mapped[str] = mapped_column(String(20), default="offline", index=True)
-    version: Mapped[str | None] = mapped_column(String(20))
+    version: Mapped[str | None] = mapped_column(String(50))
     tags: Mapped[str] = mapped_column(Text, default="[]")
     extra_data: Mapped[str] = mapped_column("extra_data", Text, default="{}")
     last_seen: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -256,7 +256,107 @@ class UpdatePackage(Base):
     filename: Mapped[str | None] = mapped_column(String(500))
     size: Mapped[int | None] = mapped_column(Integer)
     sha256: Mapped[str | None] = mapped_column(String(64))
+    release_id: Mapped[str | None] = mapped_column(String(80), unique=True, index=True)
+    component: Mapped[str] = mapped_column(String(30), default="agent")
+    target_os: Mapped[str | None] = mapped_column(String(20), index=True)
+    target_arch: Mapped[str | None] = mapped_column(String(30), index=True)
+    python_abi: Mapped[str | None] = mapped_column(String(20), index=True)
+    key_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    manifest: Mapped[str | None] = mapped_column(Text)
+    expanded_size: Mapped[int | None] = mapped_column(Integer)
+    min_updater_version: Mapped[str | None] = mapped_column(String(50))
+    validation_status: Mapped[str] = mapped_column(
+        String(30), default="legacy_untrusted", index=True,
+    )
+    validation_error: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(36), index=True)
     created: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    deployments: Mapped[list[UpdateDeployment]] = relationship(
+        back_populates="package", cascade="all, delete-orphan",
+        foreign_keys="UpdateDeployment.package_id",
+    )
+
+
+class UpdateDeployment(Base):
+    __tablename__ = "update_deployments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_pk)
+    package_id: Mapped[str] = mapped_column(
+        ForeignKey("update_packages.id", ondelete="RESTRICT"), index=True,
+    )
+    source_deployment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("update_deployments.id", ondelete="SET NULL"), index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(20), default="update", index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    canary_node_ids: Mapped[str] = mapped_column(Text, default="[]")
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    created: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    started: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    package: Mapped[UpdatePackage] = relationship(
+        back_populates="deployments", foreign_keys=[package_id],
+    )
+    targets: Mapped[list[UpdateDeploymentTarget]] = relationship(
+        back_populates="deployment", cascade="all, delete-orphan",
+    )
+
+
+class UpdateDeploymentTarget(Base):
+    __tablename__ = "update_deployment_targets"
+    __table_args__ = (UniqueConstraint("deployment_id", "node_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_pk)
+    deployment_id: Mapped[str] = mapped_column(
+        ForeignKey("update_deployments.id", ondelete="CASCADE"), index=True,
+    )
+    node_id: Mapped[str] = mapped_column(
+        ForeignKey("nodes.id", ondelete="RESTRICT"), index=True,
+    )
+    is_canary: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="queued", index=True)
+    phase: Mapped[str] = mapped_column(String(30), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    execution_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    from_release_id: Mapped[str | None] = mapped_column(String(80))
+    from_version: Mapped[str | None] = mapped_column(String(50))
+    to_release_id: Mapped[str | None] = mapped_column(String(80))
+    to_version: Mapped[str | None] = mapped_column(String(50))
+    message: Mapped[str | None] = mapped_column(String(500))
+    error: Mapped[str | None] = mapped_column(Text)
+    started: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    deployment: Mapped[UpdateDeployment] = relationship(back_populates="targets")
+    attempts_history: Mapped[list[UpdateAttempt]] = relationship(
+        back_populates="target", cascade="all, delete-orphan",
+    )
+
+
+class UpdateAttempt(Base):
+    __tablename__ = "update_attempts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_pk)
+    target_id: Mapped[str] = mapped_column(
+        ForeignKey("update_deployment_targets.id", ondelete="CASCADE"), index=True,
+    )
+    execution_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="running", index=True)
+    bytes_sent: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text)
+    started: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    target: Mapped[UpdateDeploymentTarget] = relationship(back_populates="attempts_history")
 
 
 class AlertRule(Base):

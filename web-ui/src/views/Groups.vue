@@ -2,8 +2,10 @@
 import { ref, onMounted } from 'vue'
 import { nodesApi } from '../api/nodes'
 import { useNodeStore } from '../stores/nodes'
+import { useUserStore } from '../stores/user'
 
 const nodeStore = useNodeStore()
+const userStore = useUserStore()
 const groups = ref<any[]>([])
 const dialogVisible = ref(false)
 const form = ref({ name: '', description: '', color: '#409eff' })
@@ -31,7 +33,7 @@ async function deleteGroup(id: string) {
 <template>
   <div>
     <h2>分组管理</h2>
-    <el-button type="primary" @click="dialogVisible = true" style="margin-bottom:16px">创建分组</el-button>
+    <el-button v-if="userStore.hasPermission('groups.manage')" type="primary" @click="dialogVisible = true" style="margin-bottom:16px">创建分组</el-button>
 
     <el-table :data="groups" stripe>
       <el-table-column prop="name" label="分组名称" width="200" />
@@ -44,7 +46,7 @@ async function deleteGroup(id: string) {
       <el-table-column prop="node_count" label="节点数" width="100" />
       <el-table-column label="操作" width="120">
         <template #default="{ row }">
-          <el-button size="small" type="danger" @click="deleteGroup(row.id)">删除</el-button>
+          <el-button v-if="userStore.hasPermission('groups.manage')" size="small" type="danger" @click="deleteGroup(row.id)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>

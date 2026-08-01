@@ -20,6 +20,7 @@ class FrontendPrincipal:
     role: str
     token_version: int
     expires_at: float
+    sid: str = ""
 
     def remaining_seconds(self) -> float:
         return max(0.0, self.expires_at - time.time())
@@ -31,17 +32,28 @@ class PendingAgentRequest:
     future: asyncio.Future
 
 
+@dataclass
+class AgentConnectionReadiness:
+    websocket: WebSocket
+    capabilities_seen: bool = False
+    monitor_seen: bool = False
+
+
 class ConnectionManager:
     """Manages WebSocket connections for both agents and frontend clients."""
 
     def __init__(self):
         # agent connections: node_id -> WebSocket
         self._agents: dict[str, WebSocket] = {}
+        # Privileged Brokers are authenticated independently from Agents.
+        self._brokers: dict[str, WebSocket] = {}
+        self._ws_to_broker_node: dict[WebSocket, str] = {}
         # Authenticated browser sockets and the subset subscribed to events.
         self._principals: dict[WebSocket, FrontendPrincipal] = {}
         self._frontends: set[WebSocket] = set()
         # node_id from agent registration tokens
         self._ws_to_node: dict[WebSocket, str] = {}
+        self._agent_readiness: dict[str, AgentConnectionReadiness] = {}
         self._requests: dict[str, PendingAgentRequest] = {}
 
     # ── Agent side ──
@@ -55,11 +67,48 @@ class ConnectionManager:
                 pass
         self._agents[node_id] = ws
         self._ws_to_node[ws] = node_id
+        self._agent_readiness[node_id] = AgentConnectionReadiness(websocket=ws)
 
     async def agent_disconnect(self, ws: WebSocket):
         node_id = self._ws_to_node.pop(ws, None)
         if node_id and self._agents.get(node_id) is ws:
             self._agents.pop(node_id, None)
+            self._agent_readiness.pop(node_id, None)
+
+    def mark_agent_capabilities(self, node_id: str, ws: WebSocket) -> bool:
+        readiness = self._agent_readiness.get(node_id)
+        if readiness is None or readiness.websocket is not ws:
+            return False
+        readiness.capabilities_seen = True
+        return True
+
+    def mark_agent_monitor(self, node_id: str, ws: WebSocket, payload: dict) -> bool:
+        readiness = self._agent_readiness.get(node_id)
+        if readiness is None or readiness.websocket is not ws:
+            return False
+        percentages = [
+            payload.get("cpu_percent"),
+            payload.get("mem_percent"),
+            payload.get("disk_percent"),
+        ]
+        if not all(
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and 0 <= float(value) <= 100
+            for value in percentages
+        ):
+            return False
+        readiness.monitor_seen = True
+        return True
+
+    def agent_update_ready(self, node_id: str, ws: WebSocket) -> bool:
+        readiness = self._agent_readiness.get(node_id)
+        return bool(
+            readiness is not None
+            and readiness.websocket is ws
+            and readiness.capabilities_seen
+            and readiness.monitor_seen
+        )
 
     async def send_to_agent(self, node_id: str, data: dict) -> bool:
         ws = self._agents.get(node_id)
@@ -100,6 +149,50 @@ class ConnectionManager:
 
     def get_connected_agents(self) -> list[str]:
         return list(self._agents.keys())
+
+    async def broker_connect(self, ws: WebSocket, node_id: str) -> None:
+        old = self._brokers.get(node_id)
+        if old is not None and old is not ws:
+            try:
+                await old.close(code=4002, reason="Replaced by a newer Broker connection")
+            except Exception:
+                pass
+        self._brokers[node_id] = ws
+        self._ws_to_broker_node[ws] = node_id
+
+    async def broker_disconnect(self, ws: WebSocket) -> str | None:
+        node_id = self._ws_to_broker_node.pop(ws, None)
+        if node_id and self._brokers.get(node_id) is ws:
+            self._brokers.pop(node_id, None)
+        return node_id
+
+    async def send_to_broker(self, node_id: str, data: dict) -> bool:
+        ws = self._brokers.get(node_id)
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(data)
+            return True
+        except Exception:
+            await self.broker_disconnect(ws)
+            return False
+
+    def get_connected_brokers(self) -> list[str]:
+        return list(self._brokers)
+
+    async def disconnect_broker(
+        self,
+        node_id: str,
+        code: int = 4001,
+        reason: str = "Credential changed",
+    ) -> None:
+        ws = self._brokers.get(node_id)
+        if ws is None:
+            return
+        try:
+            await ws.close(code=code, reason=reason)
+        finally:
+            await self.broker_disconnect(ws)
 
     async def disconnect_agent(self, node_id: str, code: int = 4001, reason: str = "Credential changed") -> None:
         ws = self._agents.get(node_id)

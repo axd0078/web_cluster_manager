@@ -704,7 +704,7 @@ class TaskService:
                     "progress": progress,
                 },
             },
-            allowed_roles={"admin", "operator"},
+            allowed_roles={"admin", "user"},
             allowed_user_ids={owner} if owner else set(),
             unrestricted_roles={"admin"},
         )

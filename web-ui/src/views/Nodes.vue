@@ -118,14 +118,14 @@ function getStatusType(status: string) {
       <el-table-column label="操作" width="300" fixed="right">
         <template #default="{ row }">
           <template v-if="row.kind === 'host'">
-            <el-button size="small" @click="setStatus(row.id, 'maintenance')">维护</el-button>
-            <el-button v-if="userStore.isAdmin" size="small" type="danger" @click="deleteNode(row.id)">移除</el-button>
+            <el-button v-if="userStore.hasPermission('nodes.manage')" size="small" @click="setStatus(row.id, 'maintenance')">维护</el-button>
+            <el-button v-if="userStore.hasPermission('nodes.manage')" size="small" type="danger" @click="deleteNode(row.id)">移除</el-button>
           </template>
           <template v-else>
-            <el-button v-if="userStore.isAdmin" size="small" @click="showLogs(row)">日志</el-button>
-            <el-button v-if="userStore.isAdmin" size="small" type="success" @click="containerAction(row, 'start')">启动</el-button>
-            <el-button v-if="userStore.isAdmin" size="small" type="warning" @click="containerAction(row, 'restart')">重启</el-button>
-            <el-button v-if="userStore.isAdmin" size="small" type="danger" @click="containerAction(row, 'stop')">停止</el-button>
+            <el-button v-if="userStore.hasPermission('containers.logs')" size="small" @click="showLogs(row)">日志</el-button>
+            <el-button v-if="userStore.hasPermission('containers.control')" size="small" type="success" @click="containerAction(row, 'start')">启动</el-button>
+            <el-button v-if="userStore.hasPermission('containers.control')" size="small" type="warning" @click="containerAction(row, 'restart')">重启</el-button>
+            <el-button v-if="userStore.hasPermission('containers.control')" size="small" type="danger" @click="containerAction(row, 'stop')">停止</el-button>
           </template>
         </template>
       </el-table-column>

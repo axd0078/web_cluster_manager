@@ -14,7 +14,14 @@ def _login(client, username: str, password: str) -> dict[str, str]:
         "password": password,
     })
     assert response.status_code == 200, response.text
-    return {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    csrf = {"X-CSRF-Token": client.cookies.get("wcm_csrf")}
+    if username == "admin":
+        assert client.post(
+            "/api/v2/auth/step-up",
+            headers=csrf,
+            json={"password": password},
+        ).status_code == 200
+    return csrf
 
 
 def _create_user(client, csrf, role: str):
@@ -74,7 +81,7 @@ def _wait_for_status(client, task_id: str, expected: set[str]):
     raise AssertionError(f"task did not reach {expected}: {detail.text if detail else ''}")
 
 
-def test_schema_v6_task_columns_are_present(client):
+def test_schema_v8_preserves_task_columns(client):
     from config import settings
 
     with sqlite3.connect(settings.DATA_DIR / "cluster.db") as connection:
@@ -87,14 +94,14 @@ def test_schema_v6_task_columns_are_present(client):
         subtask_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(subtasks)").fetchall()
         }
-    assert version == 6
+    assert version == 8
     assert {"started", "updated"}.issubset(task_columns)
     assert {
         "execution_id", "attempts", "progress", "message", "error",
     }.issubset(subtask_columns)
 
 
-def test_schema_v6_backup_uses_consistent_sqlite_snapshot(tmp_path, monkeypatch):
+def test_schema_v8_backup_uses_consistent_sqlite_snapshot(tmp_path, monkeypatch):
     from config import settings
     from database import _backup_before_migration
 
@@ -114,7 +121,7 @@ def test_schema_v6_backup_uses_consistent_sqlite_snapshot(tmp_path, monkeypatch)
         monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
         _backup_before_migration()
 
-    backups = list((tmp_path / "backups").glob("cluster_pre_v6_*.db"))
+    backups = list((tmp_path / "backups").glob("cluster_pre_v8_*.db"))
     assert len(backups) == 1
     with sqlite3.connect(backups[0]) as backup:
         assert backup.execute("SELECT value FROM evidence").fetchone()[0] == "committed-wal-data"
@@ -159,8 +166,8 @@ def test_terminal_task_history_is_removed_after_90_days(client):
 
 def test_task_targets_roles_pause_cancel_and_selected_retry(client):
     admin_csrf = _login(client, "admin", "test-bootstrap-password")
-    operator_name, operator_password = _create_user(client, admin_csrf, "operator")
-    viewer_name, viewer_password = _create_user(client, admin_csrf, "viewer")
+    operator_name, operator_password = _create_user(client, admin_csrf, "user")
+    viewer_name, viewer_password = _create_user(client, admin_csrf, "user")
     node_one = _enroll(client, admin_csrf, "task-node-one", ["shared", "node-one"])
     node_two = _enroll(client, admin_csrf, "task-node-two", ["shared", "node-two"])
 
@@ -272,15 +279,15 @@ def test_task_targets_roles_pause_cancel_and_selected_retry(client):
         "target_group_ids": [],
         "all_online": False,
     })
-    assert formal_without_completed_preview.status_code == 422
+    assert formal_without_completed_preview.status_code == 403
 
-    _login(client, viewer_name, viewer_password)
-    assert client.get("/api/v2/tasks/").status_code == 403
-    assert client.post("/api/v2/tasks/targets/resolve", json={
+    viewer_csrf = _login(client, viewer_name, viewer_password)
+    assert client.get("/api/v2/tasks/").status_code == 200
+    assert client.post("/api/v2/tasks/targets/resolve", headers=viewer_csrf, json={
         "target_node_ids": [node_one],
         "target_group_ids": [],
         "all_online": False,
-    }).status_code == 403
+    }).status_code == 200
 
 
 def test_cancel_requires_agent_ack_and_timeout_is_not_forged(client, monkeypatch):

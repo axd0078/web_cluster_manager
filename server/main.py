@@ -36,6 +36,8 @@ from models.user import User
 from services.node_service import NodeService
 from services.file_transfer_service import file_transfer_service
 from services.task_service import task_service
+from services.terminal_service import terminal_service
+from services.update_service import update_service
 
 
 def _validate_production_settings() -> None:
@@ -50,6 +52,10 @@ def _validate_production_settings() -> None:
         problems.append("WCM_JWT_SECRET or WCM_JWT_SECRET_FILE is required")
     if any(not origin.startswith("https://") for origin in settings.CORS_ORIGINS):
         problems.append("all production CORS origins must use https")
+    if (
+        settings.ENABLE_LOW_TERMINAL or settings.ENABLE_PRIVILEGED_TERMINAL
+    ) and not settings.COOKIE_SECURE:
+        problems.append("terminal features require secure cookies and HTTPS/WSS")
     if problems:
         raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
 
@@ -96,6 +102,8 @@ async def lifespan(app: FastAPI):
     await _bootstrap_admin()
     await file_transfer_service.recover_stale()
     await task_service.recover_after_restart()
+    await terminal_service.recover_after_restart()
+    await update_service.recover_after_restart()
     stale_task = asyncio.create_task(_stale_node_loop())
     cleanup_task = asyncio.create_task(file_transfer_service.cleanup_loop())
     task_cleanup_task = asyncio.create_task(task_service.cleanup_loop())
@@ -108,6 +116,8 @@ async def lifespan(app: FastAPI):
             await task
     await task_service.shutdown()
     await file_transfer_service.shutdown()
+    await terminal_service.shutdown()
+    await update_service.shutdown()
     await engine.dispose()
 
 
@@ -125,6 +135,11 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    if (
+        settings.ENVIRONMENT.lower() == "production"
+        and request.url.scheme.lower() != "https"
+    ):
+        return JSONResponse(status_code=400, content={"detail": "HTTPS required"})
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         if request.cookies.get(settings.ACCESS_COOKIE_NAME) and not request.headers.get("authorization"):
             cookie = request.cookies.get(settings.CSRF_COOKIE_NAME, "")
@@ -136,9 +151,10 @@ async def security_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    websocket_source = "wss:" if settings.ENVIRONMENT.lower() == "production" else "ws: wss:"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data:; connect-src 'self' ws: wss:"
+        f"img-src 'self' data:; connect-src 'self' {websocket_source}"
     )
     if settings.COOKIE_SECURE:
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"

@@ -11,7 +11,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from config import settings
 
-CURRENT_SCHEMA_VERSION = 6
+CURRENT_SCHEMA_VERSION = 8
 
 engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -41,7 +41,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db():
-    from models import node, user  # noqa: F401 — ensure models are loaded
+    from models import node, terminal, user  # noqa: F401 — ensure models are loaded
     _backup_before_migration()
     async with engine.begin() as conn:
         # Fresh databases are created with the current schema; existing tables
@@ -187,6 +187,87 @@ async def init_db():
             )
             await conn.execute(
                 text("INSERT INTO schema_migrations(version, applied_at) VALUES (6, :now)"),
+                {"now": now},
+            )
+        result = await conn.execute(text("SELECT version FROM schema_migrations WHERE version = 7"))
+        if result.scalar_one_or_none() is None:
+            user_columns = await conn.execute(text("PRAGMA table_info(users)"))
+            existing_users = {row[1] for row in user_columns.fetchall()}
+            if "disabled" not in existing_users:
+                await conn.execute(
+                    text("ALTER TABLE users ADD COLUMN disabled BOOLEAN NOT NULL DEFAULT 0")
+                )
+            # Unknown and legacy non-admin roles always migrate downward. The
+            # token version bump invalidates every pre-v7 access and refresh
+            # token, including sessions whose embedded role is now stale.
+            await conn.execute(text(
+                "UPDATE users SET role=CASE WHEN role='admin' THEN 'admin' ELSE 'user' END, "
+                "token_version=COALESCE(token_version, 0) + 1"
+            ))
+            await conn.execute(
+                text("INSERT INTO schema_migrations(version, applied_at) VALUES (7, :now)"),
+                {"now": datetime.now(timezone.utc)},
+            )
+        result = await conn.execute(text("SELECT version FROM schema_migrations WHERE version = 8"))
+        if result.scalar_one_or_none() is None:
+            package_columns = await conn.execute(text("PRAGMA table_info(update_packages)"))
+            existing_packages = {row[1] for row in package_columns.fetchall()}
+            package_additions = {
+                "release_id": "VARCHAR(80)",
+                "component": "VARCHAR(30) NOT NULL DEFAULT 'agent'",
+                "target_os": "VARCHAR(20)",
+                "target_arch": "VARCHAR(30)",
+                "python_abi": "VARCHAR(20)",
+                "key_id": "VARCHAR(64)",
+                "manifest": "TEXT",
+                "expanded_size": "INTEGER",
+                "min_updater_version": "VARCHAR(50)",
+                "validation_status": (
+                    "VARCHAR(30) NOT NULL DEFAULT 'legacy_untrusted'"
+                ),
+                "validation_error": "TEXT",
+                "created_by": "VARCHAR(36)",
+            }
+            for name, definition in package_additions.items():
+                if name not in existing_packages:
+                    await conn.execute(text(
+                        f"ALTER TABLE update_packages ADD COLUMN {name} {definition}"
+                    ))
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_update_packages_release_id "
+                "ON update_packages(release_id)"
+            ))
+            for column in (
+                "target_os", "target_arch", "python_abi", "key_id",
+                "validation_status", "created_by",
+            ):
+                await conn.execute(text(
+                    f"CREATE INDEX IF NOT EXISTS ix_update_packages_{column} "
+                    f"ON update_packages({column})"
+                ))
+            # Existing update packages predate signing and must never become
+            # deployable merely because the database was migrated.
+            await conn.execute(text(
+                "UPDATE update_packages SET validation_status='legacy_untrusted', "
+                "validation_error=COALESCE(validation_error, "
+                "'Package predates signed update schema v1') "
+                "WHERE release_id IS NULL OR manifest IS NULL OR key_id IS NULL"
+            ))
+            now = datetime.now(timezone.utc)
+            # A process restart must not silently continue widening an update
+            # rollout. Targets are made explicitly resumable by an administrator.
+            await conn.execute(text(
+                "UPDATE update_deployment_targets SET status='paused', phase='paused', "
+                "error=COALESCE(error, 'Server restarted; manual retry required'), "
+                "updated=:now WHERE status IN "
+                "('transferring','verified','activating','health_check')"
+            ), {"now": now})
+            await conn.execute(text(
+                "UPDATE update_deployments SET status='paused', updated=:now "
+                "WHERE status IN ('queued','canary_running','rolling_out')"
+            ), {"now": now})
+            await conn.execute(
+                text("INSERT INTO schema_migrations(version, applied_at) VALUES (8, :now)"),
                 {"now": now},
             )
 

@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from database import get_db
-from middleware.auth import get_current_user, require_role
+from middleware.auth import require_permission
 from models.node import Alert, Group, GroupNode, Metric, Node
 from schemas.node import (
     ClusterHealth,
@@ -32,7 +32,7 @@ async def list_nodes(
     group_id: str | None = Query(None),
     search: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_permission("cluster.read")),
 ):
     q = select(Node).options(selectinload(Node.containers))
     if status:
@@ -47,7 +47,7 @@ async def list_nodes(
 
 
 @router.get("/{node_id}", response_model=NodeResponse)
-async def get_node(node_id: str, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def get_node(node_id: str, db: AsyncSession = Depends(get_db), _user=Depends(require_permission("cluster.read"))):
     result = await db.execute(select(Node).options(selectinload(Node.containers)).where(Node.id == node_id))
     node = result.scalar_one_or_none()
     if node is None:
@@ -59,7 +59,7 @@ async def get_node(node_id: str, db: AsyncSession = Depends(get_db), _user=Depen
 async def register_node(
     body: NodeRegister,
     db: AsyncSession = Depends(get_db),
-    _admin=Depends(require_role("admin")),
+    _admin=Depends(require_permission("nodes.manage")),
 ):
     result = await db.execute(select(Node).options(selectinload(Node.containers)).where(Node.ip == body.ip))
     existing = result.scalar_one_or_none()
@@ -79,6 +79,7 @@ async def register_node(
     )
     db.add(node)
     await db.flush()
+    await db.refresh(node, attribute_names=["containers"])
     return node
 
 
@@ -86,7 +87,7 @@ async def register_node(
 async def update_node_status(
     node_id: str, body: NodeStatusUpdate,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    _user=Depends(require_permission("nodes.manage")),
 ):
     result = await db.execute(select(Node).options(selectinload(Node.containers)).where(Node.id == node_id))
     node = result.scalar_one_or_none()
@@ -101,7 +102,7 @@ async def update_node_status(
 async def delete_node(
     node_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("nodes.manage")),
 ):
     result = await db.execute(select(Node).where(Node.id == node_id))
     node = result.scalar_one_or_none()
@@ -113,7 +114,7 @@ async def delete_node(
 # ── Group CRUD ──
 
 @router.get("/groups/", response_model=list[GroupResponse])
-async def list_groups(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def list_groups(db: AsyncSession = Depends(get_db), _user=Depends(require_permission("cluster.read"))):
     result = await db.execute(select(Group).order_by(Group.name))
     groups = result.scalars().all()
     out = []
@@ -127,7 +128,7 @@ async def list_groups(db: AsyncSession = Depends(get_db), _user=Depends(get_curr
 async def create_group(
     body: GroupCreate,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    _user=Depends(require_permission("groups.manage")),
 ):
     group = Group(name=body.name, description=body.description, color=body.color)
     db.add(group)
@@ -139,7 +140,7 @@ async def create_group(
 async def delete_group(
     group_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("groups.manage")),
 ):
     result = await db.execute(select(Group).where(Group.id == group_id))
     group = result.scalar_one_or_none()
@@ -152,7 +153,7 @@ async def delete_group(
 async def add_node_to_group(
     group_id: str, node_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    _user=Depends(require_permission("groups.manage")),
 ):
     gn = GroupNode(group_id=group_id, node_id=node_id)
     db.add(gn)
@@ -162,7 +163,7 @@ async def add_node_to_group(
 async def remove_node_from_group(
     group_id: str, node_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    _user=Depends(require_permission("groups.manage")),
 ):
     result = await db.execute(
         select(GroupNode).where(GroupNode.group_id == group_id, GroupNode.node_id == node_id)
@@ -179,7 +180,7 @@ async def get_node_metrics(
     node_id: str,
     minutes: int = Query(60, ge=1, le=1440),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_permission("cluster.read")),
 ):
     cutoff = datetime.now(timezone.utc).timestamp() - (minutes * 60)
     result = await db.execute(
@@ -203,7 +204,7 @@ async def get_node_metrics(
 # ── Dashboard / Health ──
 
 @router.get("/health/summary", response_model=ClusterHealth)
-async def cluster_health(db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+async def cluster_health(db: AsyncSession = Depends(get_db), _user=Depends(require_permission("cluster.read"))):
     all_nodes = await db.execute(select(Node))
     nodes = all_nodes.scalars().all()
 

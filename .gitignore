@@ -47,6 +47,8 @@ server/updates/
 
 # Archives
 *.zip
+*.wcmupd
+*.whl
 
 # Compiled executables
 *.exe

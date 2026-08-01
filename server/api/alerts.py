@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
-from middleware.auth import get_current_user, require_role
+from middleware.auth import get_current_user, require_permission
 from models.node import Alert, AlertRule
 
 router = APIRouter(prefix="/api/v2/alerts", tags=["alerts"])
@@ -17,7 +17,7 @@ async def list_alerts(
     severity: str | None = Query(None),
     resolved: bool | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_permission("cluster.read")),
 ):
     q = select(Alert).order_by(Alert.created.desc())
     if severity:
@@ -42,7 +42,7 @@ async def list_alerts(
 async def resolve_alert(
     alert_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin", "operator")),
+    _user=Depends(require_permission("alerts.resolve")),
 ):
     result = await db.execute(select(Alert).where(Alert.id == alert_id))
     alert = result.scalar_one_or_none()
@@ -58,7 +58,7 @@ async def resolve_alert(
 @router.get("/rules")
 async def list_rules(
     db: AsyncSession = Depends(get_db),
-    _user=Depends(get_current_user),
+    _user=Depends(require_permission("cluster.read")),
 ):
     result = await db.execute(select(AlertRule).order_by(AlertRule.name))
     rules = result.scalars().all()
@@ -82,7 +82,7 @@ async def create_rule(
     duration: int = Query(60),
     channels: str = Query("[]"),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("alerts.manage")),
 ):
     rule = AlertRule(
         name=name, metric=metric, condition=condition,
@@ -109,7 +109,7 @@ async def update_rule(
     enabled: bool | None = Query(None),
     channels: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_role("admin")),
+    _user=Depends(require_permission("alerts.manage")),
 ):
     result = await db.execute(select(AlertRule).where(AlertRule.id == rule_id))
     rule = result.scalar_one_or_none()
